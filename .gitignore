@@ -4,3 +4,4 @@ dist/
 storage/screenshots/
 storage/logs/
 *.log
+.claude/settings.local.json
