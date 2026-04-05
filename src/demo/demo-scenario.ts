@@ -2,8 +2,9 @@ import { chromium } from 'playwright';
 import { BookingRequest, TaskResult } from '../types';
 import { logger } from '../services/logger';
 import { getScreenshotPath, getErrorScreenshotPath } from '../services/storage';
-import { startDemoServer, stopDemoServer } from './demo-server';
 import { config } from '../config';
+
+const DEMO_PAGE_URL = 'https://scratch-book.github.io/telega-bron-demo/';
 
 export async function runDemoScenario(
   taskId: string,
@@ -13,9 +14,7 @@ export async function runDemoScenario(
   let browser = null;
 
   try {
-    // Start local demo server
-    const baseUrl = await startDemoServer();
-    logger.info('Demo server started', { taskId, baseUrl });
+    logger.info('Using public demo page', { taskId, url: DEMO_PAGE_URL });
 
     // Launch browser (visible for demo effect)
     browser = await chromium.launch({
@@ -29,9 +28,9 @@ export async function runDemoScenario(
     });
     const page = await context.newPage();
 
-    // Step 1: Open login page
-    logger.info('[Demo] Opening login page', { taskId });
-    await page.goto(baseUrl, { waitUntil: 'networkidle' });
+    // Step 1: Open demo page
+    logger.info('[Demo] Opening demo page', { taskId });
+    await page.goto(DEMO_PAGE_URL, { waitUntil: 'networkidle' });
 
     // Step 2: Login
     logger.info('[Demo] Logging in', { taskId });
