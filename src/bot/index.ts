@@ -2,7 +2,7 @@ import { Telegraf, Context } from 'telegraf';
 import fs from 'fs';
 import { config } from '../config';
 import { BookingRequest, TaskResult } from '../types';
-import { createAndRunTask } from '../services/taskRunner';
+import { createAndRunTask, createAndRunDemoTask } from '../services/taskRunner';
 import { logger } from '../services/logger';
 import {
   validateDate,
@@ -64,6 +64,7 @@ export function createBot(): Telegraf {
       'Привет! Я бот для создания ссылок на бронирование со скидкой в RealtyCalendar.\n\n' +
       'Команды:\n' +
       '/discount — создать ссылку со скидкой (пошаговый диалог)\n' +
+      '/demo — демонстрация работы бота\n' +
       '/cancel — отменить текущий диалог\n' +
       '/status — проверить статус'
     );
@@ -83,6 +84,19 @@ export function createBot(): Telegraf {
     } else {
       await ctx.reply(`Текущий шаг: ${stepDescription(state.step)}`);
     }
+  });
+
+  // /demo command — run demo scenario with fake booking page
+  bot.command('demo', async (ctx) => {
+    resetState(ctx.from!.id);
+    const request: BookingRequest = {
+      objectId: 'Apartment 3',
+      checkInDate: '12.07.2026',
+      checkOutDate: '15.07.2026',
+      guests: 2,
+      discount: 10,
+    };
+    await startDemoTask(ctx, request);
   });
 
   // /discount command — start the step-by-step dialog
@@ -318,6 +332,58 @@ async function startTask(ctx: Context, request: BookingRequest): Promise<void> {
     });
   } catch (error: any) {
     await ctx.reply(`❌ Ошибка: ${error.message}`);
+  }
+}
+
+async function startDemoTask(ctx: Context, request: BookingRequest): Promise<void> {
+  const chatId = ctx.chat!.id;
+
+  await ctx.reply(
+    '🎬 Запускаю демонстрацию...\n\n' +
+    'Бот откроет тестовую страницу бронирования, заполнит форму, ' +
+    'создаст ссылку со скидкой и отправит результат.\n\n' +
+    `Объект: ${request.objectId}\n` +
+    `Даты: ${request.checkInDate} – ${request.checkOutDate}\n` +
+    `Гостей: ${request.guests}\n` +
+    `Скидка: ${request.discount}%`
+  );
+
+  try {
+    await createAndRunDemoTask(request, async (taskId, status, result) => {
+      try {
+        if (status === 'running') {
+          await ctx.telegram.sendMessage(chatId, `⏳ Демо ${taskId}: автоматизация работает...`);
+        } else if (status === 'completed' && result?.success) {
+          let message =
+            `✅ Демо ${taskId}: выполнено!\n\n` +
+            `Объект: ${request.objectId}\n` +
+            `Даты: ${request.checkInDate} – ${request.checkOutDate}\n` +
+            `Гостей: ${request.guests}\n` +
+            `Скидка: ${request.discount}%\n\n` +
+            `Ссылка: ${result.bookingUrl}\n\n` +
+            '💡 Это демонстрация. В рабочем режиме (/discount) бот делает то же самое на реальном сайте RealtyCalendar.';
+
+          await ctx.telegram.sendMessage(chatId, message);
+
+          if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
+            await ctx.telegram.sendPhoto(chatId, {
+              source: fs.createReadStream(result.screenshotPath),
+            });
+          }
+        } else if (status === 'error' && result) {
+          await ctx.telegram.sendMessage(chatId, `❌ Демо ошибка: ${result.errorMessage}`);
+          if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
+            await ctx.telegram.sendPhoto(chatId, {
+              source: fs.createReadStream(result.screenshotPath),
+            });
+          }
+        }
+      } catch (sendError: any) {
+        logger.error('Failed to send demo status to Telegram', { taskId, error: sendError.message });
+      }
+    });
+  } catch (error: any) {
+    await ctx.reply(`❌ Ошибка демо: ${error.message}`);
   }
 }
 

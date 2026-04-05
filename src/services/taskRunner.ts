@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { BookingRequest, TaskInfo, TaskResult } from '../types';
 import { runBookingScenario } from '../automation/scenario';
+import { runDemoScenario } from '../demo/demo-scenario';
 import { saveTask } from './storage';
 import { logger } from './logger';
 
@@ -53,6 +54,41 @@ export async function createAndRunTask(
     taskInfo.status = 'error';
     taskInfo.result = result;
     saveTask(taskInfo);
+    onStatusUpdate(taskId, 'error', result);
+  } finally {
+    isRunning = false;
+  }
+}
+
+export async function createAndRunDemoTask(
+  request: BookingRequest,
+  onStatusUpdate: (taskId: string, status: string, result?: TaskResult) => void
+): Promise<void> {
+  if (isRunning) {
+    throw new Error('Another task is already running. Please wait for it to finish.');
+  }
+
+  const taskId = 'demo-' + uuidv4().slice(0, 6);
+
+  logger.info('Demo task created', { taskId, request });
+  onStatusUpdate(taskId, 'pending');
+
+  isRunning = true;
+  onStatusUpdate(taskId, 'running');
+
+  try {
+    const result = await runDemoScenario(taskId, request);
+    onStatusUpdate(taskId, result.success ? 'completed' : 'error', result);
+  } catch (error: any) {
+    logger.error('Demo task failed', { taskId, error: error.message });
+    const result: TaskResult = {
+      taskId,
+      success: false,
+      errorMessage: error.message,
+      request,
+      startedAt: new Date(),
+      completedAt: new Date(),
+    };
     onStatusUpdate(taskId, 'error', result);
   } finally {
     isRunning = false;
