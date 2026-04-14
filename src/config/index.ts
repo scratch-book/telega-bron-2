@@ -24,7 +24,8 @@ export const config = {
     baseUrl: process.env.RC_BASE_URL || 'https://realtycalendar.ru',
   },
   playwright: {
-    headless: process.env.HEADLESS !== 'false',
+    // Force headless if no X server is available (e.g. Linux server without display)
+    headless: process.env.HEADLESS !== 'false' || !process.env.DISPLAY,
   },
   storage: {
     screenshotsDir: path.resolve(process.env.SCREENSHOTS_DIR || './storage/screenshots'),
