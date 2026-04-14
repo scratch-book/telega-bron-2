@@ -21,10 +21,6 @@ function getLoginUrl(): string {
   return `${getAppOrigin()}/auth/sign-in`;
 }
 
-function getCalendarUrl(): string {
-  return `${getAppOrigin()}/calendar`;
-}
-
 function isLoginUrl(url: string): boolean {
   return LOGIN_PATH_PATTERNS.some((pattern) => url.includes(pattern));
 }
@@ -239,14 +235,10 @@ export async function runBookingScenario(
     await ensureAuth(context, page, taskId);
     await saveDebugSnapshot(page, taskId, 'after_auth');
 
-    const calendarUrl = getCalendarUrl();
-    logger.info('Opening RealtyCalendar calendar page', { taskId, objectId: request.objectId, calendarUrl });
-    await page.goto(calendarUrl, {
-      waitUntil: 'networkidle',
-      timeout: TIMEOUT,
-    });
-    logger.info('Calendar page opened', { taskId, url: page.url() });
-    await saveDebugSnapshot(page, taskId, 'calendar_opened');
+    logger.info('Waiting for object table to load', { taskId });
+    await page.locator('#table-block').waitFor({ state: 'visible', timeout: TIMEOUT });
+    logger.info('Object table visible', { taskId, url: page.url() });
+    await saveDebugSnapshot(page, taskId, 'table_ready');
 
     logger.info('Opening property cart', { taskId, objectId: request.objectId });
     await openPropertyCart(page, request.objectId);
