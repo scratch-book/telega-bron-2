@@ -95,7 +95,8 @@ async function performLogin(page: Page, taskId: string): Promise<void> {
 
   await page.waitForLoadState('networkidle', { timeout: TIMEOUT });
   await page.waitForFunction(
-    (patterns) => !patterns.some((pattern: string) => globalThis.location.href.includes(pattern)),
+    (patterns) =>
+      !patterns.some((pattern: string) => ((globalThis as any).location?.href || '').includes(pattern)),
     LOGIN_PATH_PATTERNS,
     { timeout: TIMEOUT }
   );
