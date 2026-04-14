@@ -156,24 +156,17 @@ async function extractBookingUrl(page: Page): Promise<{ linkModal: Locator; book
   await linkModal.waitFor({ state: 'visible', timeout: TIMEOUT });
   logger.info('Link modal opened');
 
-  const directValueInput = linkModal.locator(
-    'input[readonly][value*="http"], input[type="text"][value*="http"], textarea'
-  ).first();
-
-  if (await directValueInput.count() > 0) {
-    const tagName = await directValueInput.evaluate((el) => el.tagName.toLowerCase());
-    if (tagName === 'textarea') {
-      const value = await directValueInput.evaluate((el) => (el as any).value);
-      if (value) {
-        logger.info('Booking URL extracted from textarea');
-        return { linkModal, bookingUrl: value };
-      }
-    } else {
-      const value = await directValueInput.inputValue();
-      if (value) {
-        logger.info('Booking URL extracted from text input');
-        return { linkModal, bookingUrl: value };
-      }
+  const candidates = linkModal.locator('input[readonly], input[type="text"], input, textarea');
+  const count = await candidates.count();
+  for (let i = 0; i < count; i++) {
+    const el = candidates.nth(i);
+    const tag = await el.evaluate((node) => node.tagName.toLowerCase());
+    const value = tag === 'textarea'
+      ? await el.evaluate((node) => (node as any).value)
+      : await el.inputValue();
+    if (typeof value === 'string' && value.startsWith('http')) {
+      logger.info('Booking URL extracted from input', { tag });
+      return { linkModal, bookingUrl: value };
     }
   }
 
