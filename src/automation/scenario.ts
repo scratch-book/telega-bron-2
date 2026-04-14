@@ -119,12 +119,16 @@ async function performLogin(page: Page, taskId: string): Promise<void> {
 async function openPropertyCart(page: Page, objectId: string): Promise<void> {
   const safeName = escapeRegExp(objectId);
   const tableBlock = page.locator('#table-block');
+  const LOAD_TIMEOUT = 60_000;
+
   const row = tableBlock.locator('tr, [role="row"]').filter({
     hasText: new RegExp(safeName, 'i'),
   }).first();
 
-  if (await row.count() === 0) {
-    throw new Error(`Object "${objectId}" not found in RealtyCalendar table`);
+  try {
+    await row.waitFor({ state: 'visible', timeout: LOAD_TIMEOUT });
+  } catch {
+    throw new Error(`Object "${objectId}" not found in RealtyCalendar table after ${LOAD_TIMEOUT}ms`);
   }
 
   await row.getByText('mail_outline', { exact: true }).first().click();
