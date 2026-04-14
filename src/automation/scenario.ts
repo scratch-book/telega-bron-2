@@ -80,11 +80,26 @@ async function ensureAuth(context: BrowserContext, page: Page, taskId: string): 
 }
 
 async function performLogin(page: Page, taskId: string): Promise<void> {
-  await page.waitForSelector('input[type="email"], input[name="email"], input[name="user[email]"]', {
-    timeout: TIMEOUT,
-  });
+  await saveDebugSnapshot(page, taskId, 'login_page_before_form');
 
-  const emailInput = page.locator('input[type="email"], input[name="email"], input[name="user[email]"]').first();
+  const EMAIL_SELECTOR =
+    'input[type="email"], input[name="email"], input[name="user[email]"], input[autocomplete="email"], input[placeholder*="mail" i], input[placeholder*="логин" i]';
+
+  try {
+    await page.waitForSelector(EMAIL_SELECTOR, { timeout: TIMEOUT });
+  } catch (err) {
+    // Сохраняем HTML для анализа структуры формы
+    const errorHtmlPath = getErrorHtmlPath(taskId) + '_login_form.html';
+    fs.writeFileSync(errorHtmlPath, await page.content(), 'utf-8');
+    logger.error('Login form email input not found', {
+      taskId,
+      url: page.url(),
+      errorHtmlPath,
+    });
+    throw err;
+  }
+
+  const emailInput = page.locator(EMAIL_SELECTOR).first();
   await emailInput.fill(config.realtyCalendar.login);
 
   const passwordInput = page.locator('input[type="password"], input[name="password"], input[name="user[password]"]').first();
