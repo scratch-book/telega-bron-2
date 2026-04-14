@@ -50,7 +50,7 @@ function formatRussianDate(date: string): string {
     'декабря',
   ];
 
-  return `${day} ${monthNames[month - 1]} ${year} г.`;
+  return `${day} ${monthNames[month - 1]} ${year} г`;
 }
 
 async function saveDebugSnapshot(page: Page, taskId: string, step: string): Promise<void> {
@@ -82,13 +82,11 @@ async function ensureAuth(context: BrowserContext, page: Page, taskId: string): 
 async function performLogin(page: Page, taskId: string): Promise<void> {
   await saveDebugSnapshot(page, taskId, 'login_page_before_form');
 
-  const EMAIL_SELECTOR =
-    'input[type="email"], input[name="email"], input[name="user[email]"], input[autocomplete="email"], input[placeholder*="mail" i], input[placeholder*="логин" i]';
+  const emailInput = page.getByPlaceholder(/почта|телефон|email/i).first();
 
   try {
-    await page.waitForSelector(EMAIL_SELECTOR, { timeout: TIMEOUT });
+    await emailInput.waitFor({ state: 'visible', timeout: TIMEOUT });
   } catch (err) {
-    // Сохраняем HTML для анализа структуры формы
     const errorHtmlPath = getErrorHtmlPath(taskId) + '_login_form.html';
     fs.writeFileSync(errorHtmlPath, await page.content(), 'utf-8');
     logger.error('Login form email input not found', {
@@ -99,14 +97,12 @@ async function performLogin(page: Page, taskId: string): Promise<void> {
     throw err;
   }
 
-  const emailInput = page.locator(EMAIL_SELECTOR).first();
   await emailInput.fill(config.realtyCalendar.login);
 
-  const passwordInput = page.locator('input[type="password"], input[name="password"], input[name="user[password]"]').first();
+  const passwordInput = page.getByPlaceholder(/пароль|password/i).first();
   await passwordInput.fill(config.realtyCalendar.password);
 
-  const submitBtn = page.locator('button[type="submit"], input[type="submit"]').first();
-  await submitBtn.click();
+  await page.getByRole('button', { name: /войти|sign in/i }).first().click();
 
   await page.waitForLoadState('networkidle', { timeout: TIMEOUT });
   await page.waitForFunction(
@@ -126,24 +122,18 @@ async function performLogin(page: Page, taskId: string): Promise<void> {
 
 async function openPropertyCart(page: Page, objectId: string): Promise<void> {
   const safeName = escapeRegExp(objectId);
-  const row = page.locator('th.no-move-table, tr, [role="row"]').filter({
-    has: page.locator('a.object-title, a').filter({ hasText: new RegExp(safeName, 'i') }),
+  const tableBlock = page.locator('#table-block');
+  const row = tableBlock.locator('tr, [role="row"]').filter({
+    hasText: new RegExp(safeName, 'i'),
   }).first();
 
   if (await row.count() === 0) {
     throw new Error(`Object "${objectId}" not found in RealtyCalendar table`);
   }
 
-  const mailIcon = row.locator(
-    'span.object-icon:has-text("mail_outline"), span.material-icons:has-text("mail_outline")'
-  ).first();
-
-  if (await mailIcon.count() === 0) {
-    throw new Error(`mail_outline icon was not found for object "${objectId}"`);
-  }
-
-  await mailIcon.click();
+  await row.getByText('mail_outline', { exact: true }).first().click();
   logger.info('Clicked object mail icon', { objectId });
+
   await page.getByRole('button', { name: /Корзина/i }).click();
   logger.info('Clicked cart button', { objectId });
 }
@@ -154,26 +144,11 @@ async function getCartModal(page: Page): Promise<Locator> {
   return modal;
 }
 
-async function setCartDate(modal: Locator, label: 'Заезд' | 'Выезд', value: string): Promise<void> {
-  const row = modal.locator('div.d-flex.align-items-center.flex-shrink-0').filter({ hasText: label }).first();
-  await row.waitFor({ state: 'visible', timeout: TIMEOUT });
-
-  const input = row.locator('input.input-date, input[placeholder*="Не задано"]').first();
+async function setCartDate(modal: Locator, index: 0 | 1, value: string): Promise<void> {
   const formattedValue = formatRussianDate(value);
-
-  await input.evaluate(
-    (element, nextValue) => {
-      const inputElement = element as any;
-      inputElement.removeAttribute('readonly');
-      inputElement.value = nextValue;
-      inputElement.dispatchEvent(new Event('input', { bubbles: true }));
-      inputElement.dispatchEvent(new Event('change', { bubbles: true }));
-      inputElement.dispatchEvent(new Event('blur', { bubbles: true }));
-    },
-    formattedValue
-  );
-
-  logger.info('Updated cart date field', { label, value, formattedValue });
+  await modal.getByRole('button', { name: 'date_range' }).nth(index).click();
+  await modal.page().getByLabel(formattedValue).first().click();
+  logger.info('Picked cart date', { index, value, formattedValue });
 }
 
 async function extractBookingUrl(page: Page): Promise<{ linkModal: Locator; bookingUrl: string | null }> {
@@ -202,7 +177,7 @@ async function extractBookingUrl(page: Page): Promise<{ linkModal: Locator; book
     }
   }
 
-  const copyButton = linkModal.getByRole('button', { name: /Скопировать/i }).first();
+  const copyButton = linkModal.getByRole('button', { name: /content_copy\s*Скопировать|Скопировать/i }).first();
   if (await copyButton.count() > 0) {
     await copyButton.click();
     logger.info('Clicked copy button in link modal');
@@ -287,21 +262,24 @@ export async function runBookingScenario(
       checkInDate: request.checkInDate,
       checkOutDate: request.checkOutDate,
     });
-    await setCartDate(cartModal, 'Заезд', request.checkInDate);
-    await setCartDate(cartModal, 'Выезд', request.checkOutDate);
+    await setCartDate(cartModal, 0, request.checkInDate);
+    await setCartDate(cartModal, 1, request.checkOutDate);
     await saveDebugSnapshot(page, taskId, 'dates_set');
 
     logger.info('Setting markup', { taskId, markup: request.discount });
-    const markupInput = cartModal.locator(
-      'input.form-control.form-control-sm.min-width-60.max-width-80, input[id]'
-    ).first();
+    const markupInput = cartModal.getByRole('textbox', { name: /Наценка к стоимости суток/i });
     await markupInput.fill(String(request.discount));
     logger.info('Markup field updated', { taskId, markup: request.discount });
     await saveDebugSnapshot(page, taskId, 'markup_set');
 
-    await cartModal.getByRole('button', { name: /^Добавить$/i }).click();
+    await cartModal.getByRole('button', { name: 'Добавить', exact: true }).click();
     logger.info('Clicked add button in cart modal', { taskId });
     await saveDebugSnapshot(page, taskId, 'after_add');
+
+    logger.info('Selecting guests', { taskId, guests: request.guests });
+    await cartModal.getByLabel(/Гостей/i).selectOption(String(request.guests));
+    await saveDebugSnapshot(page, taskId, 'guests_set');
+
     await cartModal.getByRole('button', { name: /Получить ссылку/i }).click();
     logger.info('Clicked get link button in cart modal', { taskId });
     await saveDebugSnapshot(page, taskId, 'link_requested');
