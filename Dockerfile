@@ -1,5 +1,5 @@
 # Base image with Node.js and Playwright dependencies
-FROM mcr.microsoft.com/playwright:v1.48.0-noble
+FROM mcr.microsoft.com/playwright:v1.59.1-noble
 
 WORKDIR /app
 
