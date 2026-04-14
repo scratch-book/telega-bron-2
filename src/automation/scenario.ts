@@ -8,6 +8,10 @@ import { getScreenshotPath, getErrorScreenshotPath } from '../services/storage';
 const TIMEOUT = 30_000;
 const LOGIN_PATH_PATTERNS = ['/login', '/sign_in', '/users/sign_in', '/auth/sign-in'];
 
+function getLoginUrl(): string {
+  return `${config.realtyCalendar.baseUrl.replace(/\/+$/, '')}/auth/sign-in`;
+}
+
 function isLoginUrl(url: string): boolean {
   return LOGIN_PATH_PATTERNS.some((pattern) => url.includes(pattern));
 }
@@ -37,8 +41,9 @@ function formatRussianDate(date: string): string {
 }
 
 async function ensureAuth(context: BrowserContext, page: Page, taskId: string): Promise<void> {
-  logger.info('Navigating to RealtyCalendar', { taskId });
-  await page.goto(config.realtyCalendar.baseUrl, {
+  const loginUrl = getLoginUrl();
+  logger.info('Navigating to RealtyCalendar login page', { taskId, loginUrl });
+  await page.goto(loginUrl, {
     waitUntil: 'networkidle',
     timeout: TIMEOUT,
   });
@@ -50,7 +55,7 @@ async function ensureAuth(context: BrowserContext, page: Page, taskId: string): 
     await context.storageState({ path: config.storage.authStateFile });
     logger.info('Auth state saved', { taskId });
   } else {
-    logger.info('Already authenticated', { taskId });
+    logger.info('Already authenticated', { taskId, url });
   }
 }
 
