@@ -3,13 +3,26 @@ import fs from 'fs';
 import { config } from '../config';
 import { BookingRequest, TaskResult } from '../types';
 import { logger } from '../services/logger';
-import { getScreenshotPath, getErrorScreenshotPath } from '../services/storage';
+import {
+  getScreenshotPath,
+  getErrorScreenshotPath,
+  getDebugScreenshotPath,
+  getErrorHtmlPath,
+} from '../services/storage';
 
 const TIMEOUT = 30_000;
 const LOGIN_PATH_PATTERNS = ['/login', '/sign_in', '/users/sign_in', '/auth/sign-in'];
 
+function getAppOrigin(): string {
+  return new URL(config.realtyCalendar.baseUrl).origin;
+}
+
 function getLoginUrl(): string {
-  return `${config.realtyCalendar.baseUrl.replace(/\/+$/, '')}/auth/sign-in`;
+  return `${getAppOrigin()}/auth/sign-in`;
+}
+
+function getCalendarUrl(): string {
+  return `${getAppOrigin()}/calendar`;
 }
 
 function isLoginUrl(url: string): boolean {
@@ -40,6 +53,12 @@ function formatRussianDate(date: string): string {
   return `${day} ${monthNames[month - 1]} ${year} г.`;
 }
 
+async function saveDebugSnapshot(page: Page, taskId: string, step: string): Promise<void> {
+  const path = getDebugScreenshotPath(taskId, step);
+  await page.screenshot({ path, fullPage: true });
+  logger.info('Saved debug screenshot', { taskId, step, path, url: page.url() });
+}
+
 async function ensureAuth(context: BrowserContext, page: Page, taskId: string): Promise<void> {
   const loginUrl = getLoginUrl();
   logger.info('Navigating to RealtyCalendar login page', { taskId, loginUrl });
@@ -47,6 +66,7 @@ async function ensureAuth(context: BrowserContext, page: Page, taskId: string): 
     waitUntil: 'networkidle',
     timeout: TIMEOUT,
   });
+  logger.info('Login page opened', { taskId, url: page.url() });
 
   const url = page.url();
   if (isLoginUrl(url)) {
@@ -226,19 +246,25 @@ export async function runBookingScenario(
     page.setDefaultTimeout(TIMEOUT);
 
     await ensureAuth(context, page, taskId);
+    await saveDebugSnapshot(page, taskId, 'after_auth');
 
-    logger.info('Opening RealtyCalendar main page', { taskId, objectId: request.objectId });
-    await page.goto(config.realtyCalendar.baseUrl, {
+    const calendarUrl = getCalendarUrl();
+    logger.info('Opening RealtyCalendar calendar page', { taskId, objectId: request.objectId, calendarUrl });
+    await page.goto(calendarUrl, {
       waitUntil: 'networkidle',
       timeout: TIMEOUT,
     });
+    logger.info('Calendar page opened', { taskId, url: page.url() });
+    await saveDebugSnapshot(page, taskId, 'calendar_opened');
 
     logger.info('Opening property cart', { taskId, objectId: request.objectId });
     await openPropertyCart(page, request.objectId);
     logger.info('Property cart flow opened', { taskId, objectId: request.objectId });
+    await saveDebugSnapshot(page, taskId, 'property_cart_opened');
 
     const cartModal = await getCartModal(page);
     logger.info('Cart modal visible', { taskId });
+    await saveDebugSnapshot(page, taskId, 'cart_modal_visible');
 
     logger.info('Setting cart dates', {
       taskId,
@@ -247,6 +273,7 @@ export async function runBookingScenario(
     });
     await setCartDate(cartModal, 'Заезд', request.checkInDate);
     await setCartDate(cartModal, 'Выезд', request.checkOutDate);
+    await saveDebugSnapshot(page, taskId, 'dates_set');
 
     logger.info('Setting markup', { taskId, markup: request.discount });
     const markupInput = cartModal.locator(
@@ -254,11 +281,14 @@ export async function runBookingScenario(
     ).first();
     await markupInput.fill(String(request.discount));
     logger.info('Markup field updated', { taskId, markup: request.discount });
+    await saveDebugSnapshot(page, taskId, 'markup_set');
 
     await cartModal.getByRole('button', { name: /^Добавить$/i }).click();
     logger.info('Clicked add button in cart modal', { taskId });
+    await saveDebugSnapshot(page, taskId, 'after_add');
     await cartModal.getByRole('button', { name: /Получить ссылку/i }).click();
     logger.info('Clicked get link button in cart modal', { taskId });
+    await saveDebugSnapshot(page, taskId, 'link_requested');
 
     logger.info('Extracting booking URL', { taskId });
     await page.waitForTimeout(1000);
@@ -313,6 +343,14 @@ export async function runBookingScenario(
           if (pages.length > 0) {
             errorScreenshot = getErrorScreenshotPath(taskId);
             await pages[0].screenshot({ path: errorScreenshot, fullPage: true });
+            const errorHtmlPath = getErrorHtmlPath(taskId);
+            fs.writeFileSync(errorHtmlPath, await pages[0].content(), 'utf-8');
+            logger.error('Saved error artifacts', {
+              taskId,
+              errorScreenshot,
+              errorHtmlPath,
+              url: pages[0].url(),
+            });
           }
         }
       }

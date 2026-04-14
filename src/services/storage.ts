@@ -47,3 +47,12 @@ export function getScreenshotPath(taskId: string): string {
 export function getErrorScreenshotPath(taskId: string): string {
   return path.join(config.storage.screenshotsDir, `${taskId}_error.png`);
 }
+
+export function getDebugScreenshotPath(taskId: string, step: string): string {
+  const safeStep = step.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(config.storage.screenshotsDir, `${taskId}_${safeStep}.png`);
+}
+
+export function getErrorHtmlPath(taskId: string): string {
+  return path.join(config.storage.logsDir, `${taskId}_error.html`);
+}
