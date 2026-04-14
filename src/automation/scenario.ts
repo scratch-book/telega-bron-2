@@ -82,7 +82,7 @@ async function ensureAuth(context: BrowserContext, page: Page, taskId: string): 
 async function performLogin(page: Page, taskId: string): Promise<void> {
   await saveDebugSnapshot(page, taskId, 'login_page_before_form');
 
-  const emailInput = page.getByPlaceholder(/почта|телефон|email/i).first();
+  const emailInput = page.getByRole('textbox', { name: /почта|телефон|email/i }).first();
 
   try {
     await emailInput.waitFor({ state: 'visible', timeout: TIMEOUT });
@@ -99,7 +99,7 @@ async function performLogin(page: Page, taskId: string): Promise<void> {
 
   await emailInput.fill(config.realtyCalendar.login);
 
-  const passwordInput = page.getByPlaceholder(/пароль|password/i).first();
+  const passwordInput = page.getByRole('textbox', { name: /пароль|password/i }).first();
   await passwordInput.fill(config.realtyCalendar.password);
 
   await page.getByRole('button', { name: /войти|sign in/i }).first().click();
