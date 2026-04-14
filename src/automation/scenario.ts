@@ -70,7 +70,7 @@ async function performLogin(page: Page, taskId: string): Promise<void> {
 
   await page.waitForLoadState('networkidle', { timeout: TIMEOUT });
   await page.waitForFunction(
-    (patterns) => !patterns.some((pattern) => window.location.href.includes(pattern)),
+    (patterns) => !patterns.some((pattern: string) => globalThis.location.href.includes(pattern)),
     LOGIN_PATH_PATTERNS,
     { timeout: TIMEOUT }
   );
@@ -122,7 +122,7 @@ async function setCartDate(modal: Locator, label: 'Заезд' | 'Выезд', v
 
   await input.evaluate(
     (element, nextValue) => {
-      const inputElement = element as HTMLInputElement;
+      const inputElement = element as any;
       inputElement.removeAttribute('readonly');
       inputElement.value = nextValue;
       inputElement.dispatchEvent(new Event('input', { bubbles: true }));
@@ -147,7 +147,7 @@ async function extractBookingUrl(page: Page): Promise<{ linkModal: Locator; book
   if (await directValueInput.count() > 0) {
     const tagName = await directValueInput.evaluate((el) => el.tagName.toLowerCase());
     if (tagName === 'textarea') {
-      const value = await directValueInput.evaluate((el) => (el as HTMLTextAreaElement).value);
+      const value = await directValueInput.evaluate((el) => (el as any).value);
       if (value) {
         logger.info('Booking URL extracted from textarea');
         return { linkModal, bookingUrl: value };
@@ -167,7 +167,10 @@ async function extractBookingUrl(page: Page): Promise<{ linkModal: Locator; book
     logger.info('Clicked copy button in link modal');
 
     try {
-      const clipboardValue = await page.evaluate(() => navigator.clipboard.readText());
+      const clipboardValue = await page.evaluate(async () => {
+        const nav = navigator as any;
+        return nav.clipboard?.readText ? await nav.clipboard.readText() : '';
+      });
       if (clipboardValue) {
         logger.info('Booking URL extracted from clipboard');
         return { linkModal, bookingUrl: clipboardValue };
