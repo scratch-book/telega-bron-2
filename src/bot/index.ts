@@ -105,48 +105,75 @@ export function createBot(): Telegraf {
     const argsText = (ctx.match[1] ?? '').trim();
 
     if (argsText) {
-      const parts = argsText.split(/\s+/);
-      if (parts.length < 4) {
-        await ctx.reply('Ошибка: ожидаю формат "/discount <объект> <заезд> <выезд> <наценка>"');
+      // Multi-object form: /discount (obj date date markup) (obj date date markup) ...
+      // Single-object form (no parens) also supported for backwards compatibility.
+      const groupRegex = /\(([^()]+)\)/g;
+      const groups: string[] = [];
+      let m: RegExpExecArray | null;
+      while ((m = groupRegex.exec(argsText)) !== null) {
+        groups.push(m[1].trim());
+      }
+      const rawEntries = groups.length > 0 ? groups : [argsText];
+
+      if (rawEntries.length > 18) {
+        await ctx.reply(`Ошибка: не более 18 объектов за раз (получено ${rawEntries.length}).`);
         return;
       }
 
-      const discountStr = parts[parts.length - 1];
-      const checkOut = parts[parts.length - 2];
-      const checkIn = parts[parts.length - 3];
-      const objectId = parts.slice(0, parts.length - 3).join(' ');
+      const requests: BookingRequest[] = [];
+      for (let i = 0; i < rawEntries.length; i++) {
+        const label = rawEntries.length > 1 ? `#${i + 1} ` : '';
+        const parts = rawEntries[i].replace(/,/g, ' ').split(/\s+/).filter(Boolean);
+        if (parts.length < 4) {
+          await ctx.reply(`Ошибка ${label}: ожидаю "<объект> <заезд> <выезд> <наценка>"`);
+          return;
+        }
 
-      const checkInResult = validateDate(checkIn);
-      if (!checkInResult.valid) {
-        await ctx.reply(`Ошибка (заезд): ${checkInResult.error}`);
-        return;
-      }
-      const checkOutResult = validateDate(checkOut);
-      if (!checkOutResult.valid) {
-        await ctx.reply(`Ошибка (выезд): ${checkOutResult.error}`);
-        return;
-      }
-      const rangeResult = validateDateRange(checkIn, checkOut);
-      if (!rangeResult.valid) {
-        await ctx.reply(`Ошибка: ${rangeResult.error}`);
-        return;
-      }
-      const discountResult = validateDiscount(discountStr);
-      if (!discountResult.valid) {
-        await ctx.reply(`Ошибка (наценка): ${discountResult.error}`);
-        return;
-      }
+        const discountStr = parts[parts.length - 1];
+        const checkOut = parts[parts.length - 2];
+        const checkIn = parts[parts.length - 3];
+        const objectId = parts.slice(0, parts.length - 3).join(' ');
 
-      const request: BookingRequest = {
-        objectId,
-        checkInDate: checkIn,
-        checkOutDate: checkOut,
-        guests: 2,
-        discount: discountResult.value!,
-      };
+        const checkInResult = validateDate(checkIn);
+        if (!checkInResult.valid) {
+          await ctx.reply(`Ошибка ${label}(заезд): ${checkInResult.error}`);
+          return;
+        }
+        const checkOutResult = validateDate(checkOut);
+        if (!checkOutResult.valid) {
+          await ctx.reply(`Ошибка ${label}(выезд): ${checkOutResult.error}`);
+          return;
+        }
+        const rangeResult = validateDateRange(checkIn, checkOut);
+        if (!rangeResult.valid) {
+          await ctx.reply(`Ошибка ${label}: ${rangeResult.error}`);
+          return;
+        }
+        const discountResult = validateDiscount(discountStr);
+        if (!discountResult.valid) {
+          await ctx.reply(`Ошибка ${label}(наценка): ${discountResult.error}`);
+          return;
+        }
+
+        requests.push({
+          objectId,
+          checkInDate: checkIn,
+          checkOutDate: checkOut,
+          guests: 2,
+          discount: discountResult.value!,
+        });
+      }
 
       resetState(userId);
-      await startTask(ctx, request);
+      if (requests.length > 1) {
+        await ctx.reply(`Принято ${requests.length} заявок. Выполняю по очереди...`);
+      }
+      for (let i = 0; i < requests.length; i++) {
+        if (requests.length > 1) {
+          await ctx.reply(`▶ ${i + 1}/${requests.length}: ${requests[i].objectId}`);
+        }
+        await startTask(ctx, requests[i]);
+      }
       return;
     }
 
