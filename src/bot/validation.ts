@@ -58,8 +58,8 @@ export function validateGuests(input: string): { valid: boolean; value?: number;
  */
 export function validateDiscount(input: string): { valid: boolean; value?: number; error?: string } {
   const num = parseInt(input, 10);
-  if (isNaN(num) || num < 1 || num > 99) {
-    return { valid: false, error: 'Скидка должна быть от 1 до 99 процентов' };
+  if (isNaN(num) || num < -99 || num > 99 || num === 0) {
+    return { valid: false, error: 'Наценка должна быть от -99 до 99 процентов (0 не допускается)' };
   }
   return { valid: true, value: num };
 }

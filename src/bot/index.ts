@@ -238,7 +238,7 @@ export function createBot(): Telegraf {
         state.data.checkOutDate = text;
         state.data.guests = 2;
         state.step = 'awaiting_discount';
-        await ctx.reply('Шаг 5/5: Размер наценки (в процентах, 1–99):');
+        await ctx.reply('Шаг 5/5: Размер наценки (в процентах, от -99 до 99):');
         break;
       }
 
