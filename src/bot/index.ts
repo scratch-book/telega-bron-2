@@ -128,15 +128,17 @@ export function createBot(): Telegraf {
       for (let i = 0; i < rawEntries.length; i++) {
         const label = rawEntries.length > 1 ? `#${i + 1} ` : '';
         const parts = rawEntries[i].split(/\s+/).filter(Boolean);
-        if (parts.length < 4) {
-          await ctx.reply(`Ошибка ${label}: ожидаю "<объект> <заезд> <выезд> <наценка>"`);
+        if (parts.length < 3) {
+          await ctx.reply(`Ошибка ${label}: ожидаю "[<объект>] <заезд> <выезд> <наценка>"`);
           return;
         }
 
         const discountStr = parts[parts.length - 1];
         const checkOut = parts[parts.length - 2];
         const checkIn = parts[parts.length - 3];
-        const objectId = parts.slice(0, parts.length - 3).join(' ');
+        // 3 tokens => no objectId (auto-discover); more tokens => prefix is name.
+        const objectIdRaw = parts.slice(0, parts.length - 3).join(' ').trim();
+        const objectId = /^(-|авто|auto)$/i.test(objectIdRaw) ? '' : objectIdRaw;
 
         const checkInResult = validateDate(checkIn);
         if (!checkInResult.valid) {
@@ -177,7 +179,8 @@ export function createBot(): Telegraf {
         for (let i = 0; i < requests.length; i++) {
           try {
             if (requests.length > 1) {
-              await ctx.reply(`▶ ${i + 1}/${requests.length}: ${requests[i].objectId}`);
+              const label = requests[i].objectId || '(авто-поиск)';
+              await ctx.reply(`▶ ${i + 1}/${requests.length}: ${label}`);
             }
             await startTask(ctx, requests[i]);
           } catch (err: any) {
@@ -194,7 +197,8 @@ export function createBot(): Telegraf {
     state.step = 'awaiting_object';
     await ctx.reply(
       'Создание ссылки со скидкой.\n\n' +
-      'Шаг 1/4: Укажите объект (название или ID объекта в RealtyCalendar):'
+      'Шаг 1/4: Укажите объект (название или ID в RealtyCalendar). ' +
+      'Введите "-" или "авто", чтобы автоматически найти свободные квартиры по датам.'
     );
   });
 
@@ -207,10 +211,10 @@ export function createBot(): Telegraf {
     switch (state.step) {
       case 'awaiting_object': {
         if (!text) {
-          await ctx.reply('Пожалуйста, укажите название или ID объекта:');
+          await ctx.reply('Пожалуйста, укажите название или ID объекта (или "-" для авто-поиска):');
           return;
         }
-        state.data.objectId = text;
+        state.data.objectId = /^(-|авто|auto)$/i.test(text) ? '' : text;
         state.step = 'awaiting_checkin';
         await ctx.reply('Шаг 2/4: Укажите дату заезда (ДД.ММ.ГГГГ):');
         break;
@@ -258,7 +262,7 @@ export function createBot(): Telegraf {
         const d = state.data;
         await ctx.reply(
           'Проверьте данные:\n\n' +
-          `Объект: ${d.objectId}\n` +
+          `Объект: ${d.objectId || '(авто-поиск свободной квартиры)'}\n` +
           `Заезд: ${d.checkInDate}\n` +
           `Выезд: ${d.checkOutDate}\n` +
           `${formatMarkup(d.discount!)}\n\n` +
@@ -307,7 +311,7 @@ async function startTask(ctx: Context, request: BookingRequest): Promise<void> {
 
   await ctx.reply(
     `Задача принята. Запускаю автоматизацию...\n\n` +
-    `Объект: ${request.objectId}\n` +
+    `Объект: ${request.objectId || '(авто-поиск)'}\n` +
     `Даты: ${request.checkInDate} – ${request.checkOutDate}\n` +
         `${formatMarkup(request.discount)}`
   );
@@ -318,10 +322,23 @@ async function startTask(ctx: Context, request: BookingRequest): Promise<void> {
         if (status === 'running') {
           await ctx.telegram.sendMessage(chatId, `⏳ Задача ${taskId}: выполняется...`);
         } else if (status === 'completed' && result?.success) {
-          // Send success message
+          if (result.availableProperties && result.availableProperties.length > 0 && !result.bookingUrl) {
+            const list = result.availableProperties.map((n, i) => `${i + 1}. ${n}`).join('\n');
+            const message =
+              `🔎 Задача ${taskId}: найдено несколько свободных квартир.\n\n` +
+              `Даты: ${request.checkInDate} – ${request.checkOutDate}\n\n` +
+              `${list}\n\n` +
+              `Повторите команду с нужным объектом, например:\n` +
+              `/discount ${result.availableProperties[0]} ${request.checkInDate} ${request.checkOutDate} ${request.discount}`;
+            await ctx.telegram.sendMessage(chatId, message);
+            if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
+              await ctx.telegram.sendPhoto(chatId, { source: fs.createReadStream(result.screenshotPath) });
+            }
+            return;
+          }
           let message =
             `✅ Задача ${taskId}: выполнено успешно!\n\n` +
-            `Объект: ${request.objectId}\n` +
+            `Объект: ${result.request.objectId || request.objectId}\n` +
             `Даты: ${request.checkInDate} – ${request.checkOutDate}\n` +
                         `${formatMarkup(request.discount)}\n\n` +
             `Ссылка: ${result.bookingUrl}`;

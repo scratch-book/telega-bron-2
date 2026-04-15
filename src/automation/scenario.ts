@@ -1,7 +1,7 @@
 import { chromium, Browser, BrowserContext, Page, Locator } from 'playwright';
 import fs from 'fs';
 import { config } from '../config';
-import { BookingRequest, TaskResult } from '../types';
+import { BookingRequest, PropertyAvailability, TaskResult } from '../types';
 import { logger } from '../services/logger';
 import {
   getScreenshotPath,
@@ -29,24 +29,48 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function parseDDMMYYYY(value: string): Date {
+  const [d, m, y] = value.split('.').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function formatDDMMYYYY(date: Date): string {
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  return `${dd}.${mm}.${date.getFullYear()}`;
+}
+
 function formatRussianDate(date: string): string {
   const [day, month, year] = date.split('.').map(Number);
   const monthNames = [
-    'января',
-    'февраля',
-    'марта',
-    'апреля',
-    'мая',
-    'июня',
-    'июля',
-    'августа',
-    'сентября',
-    'октября',
-    'ноября',
-    'декабря',
+    'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
   ];
-
   return `${day} ${monthNames[month - 1]} ${year} г`;
+}
+
+/** List of nights between checkIn (inclusive) and checkOut (exclusive) — one cell per night. */
+function enumerateNights(checkIn: string, checkOut: string): Date[] {
+  const start = parseDDMMYYYY(checkIn);
+  const end = parseDDMMYYYY(checkOut);
+  const nights: Date[] = [];
+  const cursor = new Date(start);
+  while (cursor < end) {
+    nights.push(new Date(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return nights;
+}
+
+/**
+ * A shahmatka cell is "free" iff its visible text contains a numeric price.
+ * Accepts "3300", "3 300", "3\u00a0300", "3,300.00" — anything that parses as a number after stripping spaces/commas.
+ */
+export function isCellFree(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const cleaned = text.replace(/[\s\u00a0]/g, '');
+  if (!cleaned) return false;
+  return /\d/.test(cleaned) && !isNaN(Number(cleaned.replace(/[^\d.,-]/g, '').replace(',', '.')));
 }
 
 async function saveDebugSnapshot(page: Page, taskId: string, step: string): Promise<void> {
@@ -58,20 +82,16 @@ async function saveDebugSnapshot(page: Page, taskId: string, step: string): Prom
 async function ensureAuth(context: BrowserContext, page: Page, taskId: string): Promise<void> {
   const loginUrl = getLoginUrl();
   logger.info('Navigating to RealtyCalendar login page', { taskId, loginUrl });
-  await page.goto(loginUrl, {
-    waitUntil: 'networkidle',
-    timeout: TIMEOUT,
-  });
+  await page.goto(loginUrl, { waitUntil: 'networkidle', timeout: TIMEOUT });
   logger.info('Login page opened', { taskId, url: page.url() });
 
-  const url = page.url();
-  if (isLoginUrl(url)) {
+  if (isLoginUrl(page.url())) {
     logger.info('Not authenticated, performing login', { taskId });
     await performLogin(page, taskId);
     await context.storageState({ path: config.storage.authStateFile });
     logger.info('Auth state saved', { taskId });
   } else {
-    logger.info('Already authenticated', { taskId, url });
+    logger.info('Already authenticated', { taskId, url: page.url() });
   }
 }
 
@@ -85,19 +105,12 @@ async function performLogin(page: Page, taskId: string): Promise<void> {
   } catch (err) {
     const errorHtmlPath = getErrorHtmlPath(taskId) + '_login_form.html';
     fs.writeFileSync(errorHtmlPath, await page.content(), 'utf-8');
-    logger.error('Login form email input not found', {
-      taskId,
-      url: page.url(),
-      errorHtmlPath,
-    });
+    logger.error('Login form email input not found', { taskId, url: page.url(), errorHtmlPath });
     throw err;
   }
 
   await emailInput.fill(config.realtyCalendar.login);
-
-  const passwordInput = page.getByRole('textbox', { name: /пароль|password/i }).first();
-  await passwordInput.fill(config.realtyCalendar.password);
-
+  await page.getByRole('textbox', { name: /пароль|password/i }).first().fill(config.realtyCalendar.password);
   await page.getByRole('button', { name: /войти|sign in/i }).first().click();
 
   await page.waitForLoadState('networkidle', { timeout: TIMEOUT });
@@ -108,27 +121,161 @@ async function performLogin(page: Page, taskId: string): Promise<void> {
     { timeout: TIMEOUT }
   );
 
-  const afterLoginUrl = page.url();
-  if (isLoginUrl(afterLoginUrl)) {
+  if (isLoginUrl(page.url())) {
     throw new Error('Login failed - still on login page after submitting credentials');
   }
+  logger.info('Login successful', { taskId, url: page.url() });
+}
 
-  logger.info('Login successful', { taskId, url: afterLoginUrl });
+/**
+ * Click the shahmatka's date range filter button and pick the check-in date,
+ * which scrolls the grid so the target month is visible.
+ */
+async function navigateShahmatkaToDate(page: Page, date: Date, taskId: string): Promise<void> {
+  const formatted = formatRussianDate(formatDDMMYYYY(date));
+  const filterBtn = page.locator('button[data-test-name="filter-date-range"]').first();
+
+  try {
+    await filterBtn.waitFor({ state: 'visible', timeout: TIMEOUT });
+    await filterBtn.click();
+    logger.info('Opened date range filter popover', { taskId, targetDate: formatDDMMYYYY(date) });
+
+    const label = page.getByLabel(formatted).first();
+    await label.waitFor({ state: 'visible', timeout: TIMEOUT });
+    await label.click();
+    logger.info('Picked target date in filter popover', { taskId, formatted });
+
+    // Popover may stay open — close via Escape / outside click. Ignore errors.
+    try { await page.keyboard.press('Escape'); } catch { /* noop */ }
+    await page.waitForLoadState('networkidle', { timeout: TIMEOUT });
+  } catch (err: any) {
+    logger.warn('Could not navigate shahmatka via date filter, proceeding with current view', {
+      taskId,
+      error: err?.message,
+    });
+  }
+}
+
+/**
+ * Scans the shahmatka and returns availability per property for the requested nights.
+ * Property is `available` iff every requested night's cell contains a numeric price.
+ */
+async function scanAvailability(
+  page: Page,
+  nights: Date[],
+  taskId: string
+): Promise<PropertyAvailability[]> {
+  const targetDays = nights.map((d) => d.getDate());
+
+  type ScanResult = {
+    error: string | null;
+    properties: Array<{ name: string; cellsByDay: Array<{ day: number; text: string }> }>;
+    columns: Array<[number, number]>;
+  };
+
+  const raw: ScanResult = await page.evaluate((arg: { targetDays: number[] }): ScanResult => {
+    const doc: any = (globalThis as any).document;
+    const tableBlock = doc?.querySelector('#table-block');
+    if (!tableBlock) {
+      return { error: 'table-block not found', properties: [], columns: [] };
+    }
+
+    const headerCells: any[] = Array.from(
+      tableBlock.querySelectorAll('thead th, thead td, [role="columnheader"]')
+    );
+    const dayToColumn = new Map<number, number>();
+    headerCells.forEach((cell: any, i: number) => {
+      const digits = (cell.textContent || '').match(/\d{1,2}/g);
+      if (!digits) return;
+      const n = parseInt(digits[digits.length - 1], 10);
+      if (!isNaN(n) && n >= 1 && n <= 31 && !dayToColumn.has(n)) {
+        dayToColumn.set(n, i);
+      }
+    });
+
+    const rows: any[] = Array.from(tableBlock.querySelectorAll('tbody tr'));
+    const properties: ScanResult['properties'] = [];
+
+    for (const row of rows) {
+      const firstCell: any = row.querySelector('td, th');
+      if (!firstCell) continue;
+      const nameText = (firstCell.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!nameText) continue;
+
+      const cells: any[] = Array.from(row.querySelectorAll('td, th'));
+      const cellsByDay = arg.targetDays.map((day: number) => {
+        const colIdx = dayToColumn.get(day);
+        let text = '';
+        if (colIdx !== undefined && cells[colIdx]) {
+          const priceEl = cells[colIdx].querySelector('.price');
+          text = (priceEl?.textContent || cells[colIdx].textContent || '').trim();
+        }
+        return { day, text };
+      });
+      properties.push({ name: nameText, cellsByDay });
+    }
+
+    return {
+      error: null,
+      properties,
+      columns: Array.from(dayToColumn.entries()),
+    };
+  }, { targetDays });
+
+  if (raw.error) {
+    throw new Error(`Availability scan failed: ${raw.error}`);
+  }
+
+  logger.info('Detected shahmatka date columns', { taskId, columns: raw.columns });
+
+  const results: PropertyAvailability[] = raw.properties.map((p: ScanResult['properties'][number]) => {
+    const cells = p.cellsByDay.map((c: { day: number; text: string }, i: number) => {
+      const dateStr = formatDDMMYYYY(nights[i]);
+      const free = isCellFree(c.text);
+      return { date: dateStr, text: c.text, free };
+    });
+    const unavailableReason = cells.find((c) => !c.free);
+    const available = !unavailableReason;
+    logger.info('Checking property availability', {
+      taskId,
+      propertyName: p.name,
+      dates: cells,
+      available,
+      reason: unavailableReason
+        ? `no numeric price in cell for ${unavailableReason.date} (text="${unavailableReason.text}")`
+        : undefined,
+    });
+    return { name: p.name, available, cells };
+  });
+
+  return results;
+}
+
+async function saveShahmatkaErrorSnapshot(page: Page, taskId: string, step: string): Promise<void> {
+  try {
+    const screenshot = getDebugScreenshotPath(taskId, step);
+    await page.screenshot({ path: screenshot, fullPage: true });
+    const htmlPath = getErrorHtmlPath(taskId) + `_${step}.html`;
+    const tableHtml = await page.locator('#table-block').innerHTML().catch(() => '');
+    fs.writeFileSync(htmlPath, tableHtml || (await page.content()), 'utf-8');
+    logger.error('Saved shahmatka debug artifacts', { taskId, step, screenshot, htmlPath });
+  } catch (err: any) {
+    logger.warn('Failed to save shahmatka snapshot', { taskId, step, error: err?.message });
+  }
 }
 
 async function openPropertyCart(page: Page, objectId: string): Promise<void> {
   const safeName = escapeRegExp(objectId);
   const tableBlock = page.locator('#table-block');
-  const LOAD_TIMEOUT = 30_000;
 
   const row = tableBlock.locator('tr, [role="row"]').filter({
     hasText: new RegExp(safeName, 'i'),
   }).first();
 
   try {
-    await row.waitFor({ state: 'visible', timeout: LOAD_TIMEOUT });
+    await row.waitFor({ state: 'visible', timeout: TIMEOUT });
   } catch {
-    throw new Error(`Object "${objectId}" not found in RealtyCalendar table after ${LOAD_TIMEOUT}ms`);
+    throw new Error(`Object "${objectId}" not found in RealtyCalendar table after ${TIMEOUT}ms`);
   }
 
   await row.getByText('mail_outline', { exact: true }).first().click();
@@ -174,7 +321,6 @@ async function extractBookingUrl(page: Page): Promise<{ linkModal: Locator; book
   if (await copyButton.count() > 0) {
     await copyButton.click();
     logger.info('Clicked copy button in link modal');
-
     try {
       const clipboardValue = await page.evaluate(async () => {
         const nav = navigator as any;
@@ -192,10 +338,7 @@ async function extractBookingUrl(page: Page): Promise<{ linkModal: Locator; book
   const hrefLink = linkModal.locator('a[href*="http"]').first();
   if (await hrefLink.count() > 0) {
     logger.info('Booking URL extracted from anchor href');
-    return {
-      linkModal,
-      bookingUrl: await hrefLink.getAttribute('href'),
-    };
+    return { linkModal, bookingUrl: await hrefLink.getAttribute('href') };
   }
 
   return { linkModal, bookingUrl: null };
@@ -211,9 +354,7 @@ export async function runBookingScenario(
   try {
     logger.info('Starting booking scenario', { taskId, request });
 
-    browser = await chromium.launch({
-      headless: config.playwright.headless,
-    });
+    browser = await chromium.launch({ headless: config.playwright.headless });
 
     const contextOptions: any = {
       viewport: { width: 1280, height: 800 },
@@ -234,16 +375,81 @@ export async function runBookingScenario(
 
     logger.info('Waiting for object table to load', { taskId });
     await page.locator('#table-block').waitFor({ state: 'visible', timeout: TIMEOUT });
-    logger.info('Object table visible', { taskId, url: page.url() });
     await saveDebugSnapshot(page, taskId, 'table_ready');
 
-    logger.info('Opening property cart', { taskId, objectId: request.objectId });
-    await openPropertyCart(page, request.objectId);
-    logger.info('Property cart flow opened', { taskId, objectId: request.objectId });
+    // --- Availability discovery ---
+    const nights = enumerateNights(request.checkInDate, request.checkOutDate);
+    if (nights.length === 0) {
+      throw new Error('Checkout date must be after check-in date');
+    }
+    logger.info('Enumerated nights for availability scan', {
+      taskId,
+      nights: nights.map(formatDDMMYYYY),
+    });
+
+    await navigateShahmatkaToDate(page, nights[0], taskId);
+    await saveDebugSnapshot(page, taskId, 'shahmatka_navigated');
+
+    let availability: PropertyAvailability[];
+    try {
+      availability = await scanAvailability(page, nights, taskId);
+    } catch (err) {
+      await saveShahmatkaErrorSnapshot(page, taskId, 'availability_scan_failed');
+      throw err;
+    }
+
+    const free = availability.filter((a) => a.available);
+    logger.info('Availability scan completed', {
+      taskId,
+      totalProperties: availability.length,
+      freeCount: free.length,
+      freeNames: free.map((a) => a.name),
+    });
+
+    // --- Decide target property ---
+    const requestedName = (request.objectId ?? '').trim();
+    let targetName: string | null = null;
+
+    if (requestedName) {
+      const match = free.find((a) =>
+        a.name.toLowerCase().includes(requestedName.toLowerCase())
+      );
+      if (!match) {
+        await saveShahmatkaErrorSnapshot(page, taskId, 'requested_not_free');
+        throw new Error(
+          `Объект "${requestedName}" недоступен на указанные даты. ` +
+          `Свободные варианты: ${free.map((a) => a.name).join(', ') || 'нет'}`
+        );
+      }
+      targetName = match.name;
+    } else if (free.length === 0) {
+      await saveShahmatkaErrorSnapshot(page, taskId, 'no_free_properties');
+      throw new Error('Нет свободных квартир на указанные даты.');
+    } else if (free.length === 1) {
+      targetName = free[0].name;
+      logger.info('Single free property auto-selected', { taskId, targetName });
+    } else {
+      // Multiple free: return the list, don't book.
+      const screenshotPath = getScreenshotPath(taskId);
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      await context.close();
+      return {
+        taskId,
+        success: true,
+        availableProperties: free.map((a) => a.name),
+        screenshotPath,
+        request,
+        startedAt,
+        completedAt: new Date(),
+      };
+    }
+
+    // --- Booking flow for the chosen property ---
+    logger.info('Opening property cart', { taskId, targetName });
+    await openPropertyCart(page, targetName);
     await saveDebugSnapshot(page, taskId, 'property_cart_opened');
 
     const cartModal = await getCartModal(page);
-    logger.info('Cart modal visible', { taskId });
     await saveDebugSnapshot(page, taskId, 'cart_modal_visible');
 
     logger.info('Setting cart dates', {
@@ -258,22 +464,16 @@ export async function runBookingScenario(
     logger.info('Setting markup', { taskId, markup: request.discount });
     const markupInput = cartModal.getByRole('textbox', { name: /Наценка к стоимости суток/i });
     await markupInput.fill(String(request.discount));
-    logger.info('Markup field updated', { taskId, markup: request.discount });
     await saveDebugSnapshot(page, taskId, 'markup_set');
 
     await cartModal.getByRole('button', { name: 'Добавить', exact: true }).click();
     logger.info('Clicked add button in cart modal', { taskId });
     await saveDebugSnapshot(page, taskId, 'after_add');
 
-    // logger.info('Selecting guests', { taskId, guests: request.guests });
-    // await cartModal.getByLabel(/Гостей/i).selectOption(String(request.guests));
-    // await saveDebugSnapshot(page, taskId, 'guests_set');
-
     await cartModal.getByRole('button', { name: /Получить ссылку/i }).click();
     logger.info('Clicked get link button in cart modal', { taskId });
     await saveDebugSnapshot(page, taskId, 'link_requested');
 
-    logger.info('Extracting booking URL', { taskId });
     await page.waitForTimeout(1000);
     const { linkModal, bookingUrl } = await extractBookingUrl(page);
 
@@ -303,19 +503,15 @@ export async function runBookingScenario(
       success: true,
       bookingUrl,
       screenshotPath,
-      request,
+      request: { ...request, objectId: targetName },
       startedAt,
       completedAt: new Date(),
     };
 
-    logger.info('Booking scenario completed successfully', { taskId, bookingUrl });
+    logger.info('Booking scenario completed successfully', { taskId, bookingUrl, targetName });
     return result;
   } catch (error: any) {
-    logger.error('Booking scenario failed', {
-      taskId,
-      error: error.message,
-      stack: error.stack,
-    });
+    logger.error('Booking scenario failed', { taskId, error: error.message, stack: error.stack });
 
     let errorScreenshot: string | undefined;
     try {
@@ -329,16 +525,13 @@ export async function runBookingScenario(
             const errorHtmlPath = getErrorHtmlPath(taskId);
             fs.writeFileSync(errorHtmlPath, await pages[0].content(), 'utf-8');
             logger.error('Saved error artifacts', {
-              taskId,
-              errorScreenshot,
-              errorHtmlPath,
-              url: pages[0].url(),
+              taskId, errorScreenshot, errorHtmlPath, url: pages[0].url(),
             });
           }
         }
       }
     } catch {
-      // Ignore screenshot errors during error handling
+      // Ignore
     }
 
     return {
