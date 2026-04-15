@@ -265,9 +265,9 @@ export async function runBookingScenario(
     logger.info('Clicked add button in cart modal', { taskId });
     await saveDebugSnapshot(page, taskId, 'after_add');
 
-    logger.info('Selecting guests', { taskId, guests: request.guests });
-    await cartModal.getByLabel(/Гостей/i).selectOption(String(request.guests));
-    await saveDebugSnapshot(page, taskId, 'guests_set');
+    // logger.info('Selecting guests', { taskId, guests: request.guests });
+    // await cartModal.getByLabel(/Гостей/i).selectOption(String(request.guests));
+    // await saveDebugSnapshot(page, taskId, 'guests_set');
 
     await cartModal.getByRole('button', { name: /Получить ссылку/i }).click();
     logger.info('Clicked get link button in cart modal', { taskId });
