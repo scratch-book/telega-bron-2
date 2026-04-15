@@ -119,7 +119,7 @@ async function performLogin(page: Page, taskId: string): Promise<void> {
 async function openPropertyCart(page: Page, objectId: string): Promise<void> {
   const safeName = escapeRegExp(objectId);
   const tableBlock = page.locator('#table-block');
-  const LOAD_TIMEOUT = 60_000;
+  const LOAD_TIMEOUT = 30_000;
 
   const row = tableBlock.locator('tr, [role="row"]').filter({
     hasText: new RegExp(safeName, 'i'),

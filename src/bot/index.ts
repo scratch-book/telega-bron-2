@@ -123,7 +123,7 @@ export function createBot(): Telegraf {
       const requests: BookingRequest[] = [];
       for (let i = 0; i < rawEntries.length; i++) {
         const label = rawEntries.length > 1 ? `#${i + 1} ` : '';
-        const parts = rawEntries[i].replace(/,/g, ' ').split(/\s+/).filter(Boolean);
+        const parts = rawEntries[i].split(/\s+/).filter(Boolean);
         if (parts.length < 4) {
           await ctx.reply(`Ошибка ${label}: ожидаю "<объект> <заезд> <выезд> <наценка>"`);
           return;
@@ -168,12 +168,20 @@ export function createBot(): Telegraf {
       if (requests.length > 1) {
         await ctx.reply(`Принято ${requests.length} заявок. Выполняю по очереди...`);
       }
-      for (let i = 0; i < requests.length; i++) {
-        if (requests.length > 1) {
-          await ctx.reply(`▶ ${i + 1}/${requests.length}: ${requests[i].objectId}`);
+      // Run in background so the bot handler doesn't hit Telegraf's 90s timeout
+      void (async () => {
+        for (let i = 0; i < requests.length; i++) {
+          try {
+            if (requests.length > 1) {
+              await ctx.reply(`▶ ${i + 1}/${requests.length}: ${requests[i].objectId}`);
+            }
+            await startTask(ctx, requests[i]);
+          } catch (err: any) {
+            logger.error('Batch task failed', { index: i + 1, error: err?.message });
+            try { await ctx.reply(`❌ ${i + 1}/${requests.length}: ${err?.message ?? err}`); } catch {}
+          }
         }
-        await startTask(ctx, requests[i]);
-      }
+      })();
       return;
     }
 
