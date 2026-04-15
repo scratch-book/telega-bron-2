@@ -42,24 +42,3 @@ export function validateDateRange(checkIn: string, checkOut: string): { valid: b
   return { valid: true };
 }
 
-/**
- * Validates guests count.
- */
-export function validateGuests(input: string): { valid: boolean; value?: number; error?: string } {
-  const num = parseInt(input, 10);
-  if (isNaN(num) || num < 1 || num > 50) {
-    return { valid: false, error: 'Количество гостей должно быть от 1 до 50' };
-  }
-  return { valid: true, value: num };
-}
-
-/**
- * Validates discount percentage.
- */
-export function validateDiscount(input: string): { valid: boolean; value?: number; error?: string } {
-  const num = parseInt(input, 10);
-  if (isNaN(num) || num < -99 || num > 99 || num === 0) {
-    return { valid: false, error: 'Наценка должна быть от -99 до 99 процентов (0 не допускается)' };
-  }
-  return { valid: true, value: num };
-}

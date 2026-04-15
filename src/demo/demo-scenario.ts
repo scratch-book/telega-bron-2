@@ -42,7 +42,7 @@ export async function runDemoScenario(
     // Step 3: Select property
     logger.info('[Demo] Selecting property', { taskId, objectId: request.objectId });
     const propertyLink = page.locator('.object-link').filter({
-      hasText: new RegExp(request.objectId, 'i'),
+      hasText: new RegExp(request.objectId || '.*', 'i'),
     }).first();
 
     if (await propertyLink.count() === 0) {
@@ -57,8 +57,6 @@ export async function runDemoScenario(
     logger.info('[Demo] Filling booking form', { taskId });
     await page.fill('#checkIn', request.checkInDate);
     await page.fill('#checkOut', request.checkOutDate);
-    await page.fill('#guests', String(request.guests));
-    await page.fill('#discount', String(request.discount));
 
     if (request.comment) {
       await page.fill('#comment', request.comment);

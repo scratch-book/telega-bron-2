@@ -2,8 +2,6 @@ export interface BookingRequest {
   objectId?: string;     // optional: empty/undefined => auto-discover free property
   checkInDate: string;   // DD.MM.YYYY
   checkOutDate: string;  // DD.MM.YYYY
-  guests: number;
-  discount: number;      // percent
   comment?: string;
   clientName?: string;
 }

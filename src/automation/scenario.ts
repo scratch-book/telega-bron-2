@@ -461,11 +461,6 @@ export async function runBookingScenario(
     await setCartDate(cartModal, 1, request.checkOutDate);
     await saveDebugSnapshot(page, taskId, 'dates_set');
 
-    logger.info('Setting markup', { taskId, markup: request.discount });
-    const markupInput = cartModal.getByRole('textbox', { name: /Наценка к стоимости суток/i });
-    await markupInput.fill(String(request.discount));
-    await saveDebugSnapshot(page, taskId, 'markup_set');
-
     await cartModal.getByRole('button', { name: 'Добавить', exact: true }).click();
     logger.info('Clicked add button in cart modal', { taskId });
     await saveDebugSnapshot(page, taskId, 'after_add');
