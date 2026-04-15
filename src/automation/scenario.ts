@@ -127,25 +127,77 @@ async function performLogin(page: Page, taskId: string): Promise<void> {
   logger.info('Login successful', { taskId, url: page.url() });
 }
 
+const MONTH_NAMES = [
+  'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+  'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
+];
+
 /**
- * Click the shahmatka's date range filter button and pick the check-in date,
- * which scrolls the grid so the target month is visible.
+ * Click the shahmatka's date range filter button and pick the check-in date.
+ * The site opens a month picker that covers the shahmatka — we must click the
+ * target month to close it and scroll the grid to that month.
  */
 async function navigateShahmatkaToDate(page: Page, date: Date, taskId: string): Promise<void> {
   const formatted = formatRussianDate(formatDDMMYYYY(date));
+  const targetMonthName = MONTH_NAMES[date.getMonth()];
+  const targetYear = date.getFullYear();
   const filterBtn = page.locator('button[data-test-name="filter-date-range"]').first();
 
   try {
     await filterBtn.waitFor({ state: 'visible', timeout: TIMEOUT });
     await filterBtn.click();
-    logger.info('Opened date range filter popover', { taskId, targetDate: formatDDMMYYYY(date) });
+    logger.info('Opened date range filter popover', {
+      taskId,
+      targetDate: formatDDMMYYYY(date),
+      targetMonthName,
+      targetYear,
+    });
 
-    const label = page.getByLabel(formatted).first();
-    await label.waitFor({ state: 'visible', timeout: TIMEOUT });
-    await label.click();
-    logger.info('Picked target date in filter popover', { taskId, formatted });
+    // If month picker opened (covers the shahmatka), navigate year arrows
+    // until the target year is shown, then click the target month.
+    const monthBtn = page.getByRole('button', { name: new RegExp(`^\\s*${targetMonthName}\\s*$`, 'i') }).first();
+    let monthPickerVisible = false;
+    try {
+      await monthBtn.waitFor({ state: 'visible', timeout: 3000 });
+      monthPickerVisible = true;
+    } catch {
+      logger.info('Month picker not visible, will try day label directly', { taskId });
+    }
 
-    // Popover may stay open — close via Escape / outside click. Ignore errors.
+    if (monthPickerVisible) {
+      // Try to align year by reading the currently displayed year and stepping arrows.
+      for (let i = 0; i < 12; i++) {
+        const yearText = await page
+          .locator('text=/^\\s*\\d{4}\\s*$/')
+          .first()
+          .textContent()
+          .catch(() => null);
+        const shownYear = yearText ? parseInt(yearText.trim(), 10) : NaN;
+        if (!Number.isFinite(shownYear) || shownYear === targetYear) break;
+        const arrowName = shownYear < targetYear ? /^›$|next|впер/i : /^‹$|prev|назад/i;
+        const arrow = page.getByRole('button', { name: arrowName }).first();
+        if (await arrow.count() === 0) break;
+        await arrow.click().catch(() => {});
+        await page.waitForTimeout(150);
+      }
+
+      await monthBtn.click();
+      logger.info('Clicked target month in picker', { taskId, targetMonthName });
+      await page.waitForTimeout(300);
+    }
+
+    // Some layouts still show a day-picker popover after month selection.
+    // Try to pick the exact day; if not found, month selection alone is enough.
+    try {
+      const label = page.getByLabel(formatted).first();
+      await label.waitFor({ state: 'visible', timeout: 3000 });
+      await label.click();
+      logger.info('Picked target date in filter popover', { taskId, formatted });
+    } catch {
+      logger.info('Day label not shown — month click was sufficient', { taskId });
+    }
+
+    // Popover may stay open — close via Escape. Ignore errors.
     try { await page.keyboard.press('Escape'); } catch { /* noop */ }
     await page.waitForLoadState('networkidle', { timeout: TIMEOUT });
   } catch (err: any) {
