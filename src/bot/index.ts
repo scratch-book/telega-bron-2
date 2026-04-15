@@ -37,6 +37,10 @@ function resetState(userId: number): void {
   conversations.set(userId, { step: 'idle', data: {} });
 }
 
+function formatMarkup(n: number): string {
+  return n < 0 ? `Скидка: ${Math.abs(n)}%` : `Наценка: ${n}%`;
+}
+
 function isAuthorized(userId: number): boolean {
   return config.telegram.allowedUserIds.includes(userId);
 }
@@ -257,7 +261,7 @@ export function createBot(): Telegraf {
           `Объект: ${d.objectId}\n` +
           `Заезд: ${d.checkInDate}\n` +
           `Выезд: ${d.checkOutDate}\n` +
-          `Скидка: ${d.discount}%\n\n` +
+          `${formatMarkup(d.discount!)}\n\n` +
           'Всё верно? Отправьте "да" для подтверждения или "нет" для отмены.'
         );
         break;
@@ -305,8 +309,7 @@ async function startTask(ctx: Context, request: BookingRequest): Promise<void> {
     `Задача принята. Запускаю автоматизацию...\n\n` +
     `Объект: ${request.objectId}\n` +
     `Даты: ${request.checkInDate} – ${request.checkOutDate}\n` +
-    `Гостей: ${request.guests}\n` +
-    `Скидка: ${request.discount}%`
+        `${formatMarkup(request.discount)}`
   );
 
   try {
@@ -320,8 +323,7 @@ async function startTask(ctx: Context, request: BookingRequest): Promise<void> {
             `✅ Задача ${taskId}: выполнено успешно!\n\n` +
             `Объект: ${request.objectId}\n` +
             `Даты: ${request.checkInDate} – ${request.checkOutDate}\n` +
-            `Гостей: ${request.guests}\n` +
-            `Скидка: ${request.discount}%\n\n` +
+                        `${formatMarkup(request.discount)}\n\n` +
             `Ссылка: ${result.bookingUrl}`;
 
           await ctx.telegram.sendMessage(chatId, message);
@@ -367,8 +369,7 @@ async function startDemoTask(ctx: Context, request: BookingRequest): Promise<voi
     'создаст ссылку со скидкой и отправит результат.\n\n' +
     `Объект: ${request.objectId}\n` +
     `Даты: ${request.checkInDate} – ${request.checkOutDate}\n` +
-    `Гостей: ${request.guests}\n` +
-    `Скидка: ${request.discount}%`
+        `${formatMarkup(request.discount)}`
   );
 
   try {
@@ -381,8 +382,7 @@ async function startDemoTask(ctx: Context, request: BookingRequest): Promise<voi
             `✅ Демо ${taskId}: выполнено!\n\n` +
             `Объект: ${request.objectId}\n` +
             `Даты: ${request.checkInDate} – ${request.checkOutDate}\n` +
-            `Гостей: ${request.guests}\n` +
-            `Скидка: ${request.discount}%\n\n` +
+                        `${formatMarkup(request.discount)}\n\n` +
             `Ссылка: ${result.bookingUrl}\n\n` +
             '💡 Это демонстрация. В рабочем режиме (/discount) бот делает то же самое на реальном сайте RealtyCalendar.';
 
