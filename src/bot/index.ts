@@ -7,7 +7,6 @@ import { logger } from '../services/logger';
 import {
   validateDate,
   validateDateRange,
-  validateGuests,
   validateDiscount,
 } from './validation';
 
@@ -17,7 +16,6 @@ type ConversationStep =
   | 'awaiting_object'
   | 'awaiting_checkin'
   | 'awaiting_checkout'
-  | 'awaiting_guests'
   | 'awaiting_discount'
   | 'awaiting_confirm';
 
@@ -99,35 +97,33 @@ export function createBot(): Telegraf {
     await startDemoTask(ctx, request);
   });
 
-  // /discount command — start the step-by-step dialog
-  bot.command('discount', async (ctx) => {
+  // /discount command — one-line mode with args OR start step-by-step dialog
+  // One-line example: /discount Кучуры 8 20.04.2026 24.04.2026 10
+  // Object name may contain spaces; last token = markup, last two before = dates.
+  bot.hears(/^\/discount(?:\s+(.+))?$/i, async (ctx) => {
     const userId = ctx.from!.id;
-    resetState(userId);
+    const argsText = (ctx.match[1] ?? '').trim();
 
-    const state = getState(userId);
-    state.step = 'awaiting_object';
-    await ctx.reply(
-      'Создание ссылки со скидкой.\n\n' +
-      'Шаг 1/5: Укажите объект (название или ID объекта в RealtyCalendar):'
-    );
-  });
+    if (argsText) {
+      const parts = argsText.split(/\s+/);
+      if (parts.length < 4) {
+        await ctx.reply('Ошибка: ожидаю формат "/discount <объект> <заезд> <выезд> <наценка>"');
+        return;
+      }
 
-  // Handle one-line /discount command with all parameters
-  // Example: /discount apartment_3 12.07.2026 15.07.2026 2 10
-  bot.hears(/^\/discount\s+(.+)$/i, async (ctx) => {
-    const parts = ctx.match[1].trim().split(/\s+/);
-    if (parts.length >= 5) {
-      const [objectId, checkIn, checkOut, guestsStr, discountStr] = parts;
+      const discountStr = parts[parts.length - 1];
+      const checkOut = parts[parts.length - 2];
+      const checkIn = parts[parts.length - 3];
+      const objectId = parts.slice(0, parts.length - 3).join(' ');
 
-      // Validate all at once
       const checkInResult = validateDate(checkIn);
       if (!checkInResult.valid) {
-        await ctx.reply(`Ошибка: ${checkInResult.error}`);
+        await ctx.reply(`Ошибка (заезд): ${checkInResult.error}`);
         return;
       }
       const checkOutResult = validateDate(checkOut);
       if (!checkOutResult.valid) {
-        await ctx.reply(`Ошибка: ${checkOutResult.error}`);
+        await ctx.reply(`Ошибка (выезд): ${checkOutResult.error}`);
         return;
       }
       const rangeResult = validateDateRange(checkIn, checkOut);
@@ -135,14 +131,9 @@ export function createBot(): Telegraf {
         await ctx.reply(`Ошибка: ${rangeResult.error}`);
         return;
       }
-      const guestsResult = validateGuests(guestsStr);
-      if (!guestsResult.valid) {
-        await ctx.reply(`Ошибка: ${guestsResult.error}`);
-        return;
-      }
       const discountResult = validateDiscount(discountStr);
       if (!discountResult.valid) {
-        await ctx.reply(`Ошибка: ${discountResult.error}`);
+        await ctx.reply(`Ошибка (наценка): ${discountResult.error}`);
         return;
       }
 
@@ -150,13 +141,22 @@ export function createBot(): Telegraf {
         objectId,
         checkInDate: checkIn,
         checkOutDate: checkOut,
-        guests: guestsResult.value!,
+        guests: 2,
         discount: discountResult.value!,
       };
 
+      resetState(userId);
       await startTask(ctx, request);
+      return;
     }
-    // If less than 5 parts, the regular /discount handler will handle it
+
+    resetState(userId);
+    const state = getState(userId);
+    state.step = 'awaiting_object';
+    await ctx.reply(
+      'Создание ссылки со скидкой.\n\n' +
+      'Шаг 1/4: Укажите объект (название или ID объекта в RealtyCalendar):'
+    );
   });
 
   // Handle text messages for step-by-step dialog
@@ -173,7 +173,7 @@ export function createBot(): Telegraf {
         }
         state.data.objectId = text;
         state.step = 'awaiting_checkin';
-        await ctx.reply('Шаг 2/5: Укажите дату заезда (ДД.ММ.ГГГГ):');
+        await ctx.reply('Шаг 2/4: Укажите дату заезда (ДД.ММ.ГГГГ):');
         break;
       }
 
@@ -185,7 +185,7 @@ export function createBot(): Telegraf {
         }
         state.data.checkInDate = text;
         state.step = 'awaiting_checkout';
-        await ctx.reply('Шаг 3/5: Укажите дату выезда (ДД.ММ.ГГГГ):');
+        await ctx.reply('Шаг 3/4: Укажите дату выезда (ДД.ММ.ГГГГ):');
         break;
       }
 
@@ -201,20 +201,9 @@ export function createBot(): Telegraf {
           return;
         }
         state.data.checkOutDate = text;
-        state.step = 'awaiting_guests';
-        await ctx.reply('Шаг 4/5: Сколько гостей?');
-        break;
-      }
-
-      case 'awaiting_guests': {
-        const result = validateGuests(text);
-        if (!result.valid) {
-          await ctx.reply(`${result.error}\nПопробуйте снова:`);
-          return;
-        }
-        state.data.guests = result.value;
+        state.data.guests = 2;
         state.step = 'awaiting_discount';
-        await ctx.reply('Шаг 5/5: Размер скидки (в процентах, 1–99):');
+        await ctx.reply('Шаг 5/5: Размер наценки (в процентах, 1–99):');
         break;
       }
 
@@ -233,7 +222,6 @@ export function createBot(): Telegraf {
           `Объект: ${d.objectId}\n` +
           `Заезд: ${d.checkInDate}\n` +
           `Выезд: ${d.checkOutDate}\n` +
-          `Гостей: ${d.guests}\n` +
           `Скидка: ${d.discount}%\n\n` +
           'Всё верно? Отправьте "да" для подтверждения или "нет" для отмены.'
         );
@@ -393,7 +381,6 @@ function stepDescription(step: ConversationStep): string {
     awaiting_object: 'ожидание объекта',
     awaiting_checkin: 'ожидание даты заезда',
     awaiting_checkout: 'ожидание даты выезда',
-    awaiting_guests: 'ожидание количества гостей',
     awaiting_discount: 'ожидание размера скидки',
     awaiting_confirm: 'ожидание подтверждения',
   };
