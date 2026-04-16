@@ -219,6 +219,40 @@ async function scanAvailability(
 ): Promise<PropertyAvailability[]> {
   const targetDays = nights.map((d) => d.getDate());
 
+  // Diagnose: where do .day-number spans live in the DOM?
+  const ancestry: any = await page.evaluate(() => {
+    const doc = (globalThis as any).document;
+    const tb = doc?.querySelector('#table-block');
+    if (!tb) return { error: 'no table-block' };
+    const span = tb.querySelector('.day-number');
+    if (!span) return { error: 'no .day-number found' };
+
+    // Walk up from .day-number to #table-block
+    const chain: string[] = [];
+    let el = span;
+    while (el && el !== tb) {
+      const tag = el.tagName || '?';
+      const cls = (el.className || '').substring(0, 80);
+      const id = el.id || '';
+      chain.push(`<${tag} id="${id}" class="${cls}">`);
+      el = el.parentElement;
+    }
+
+    // Also find the closest <tr> ancestor of the span (if any)
+    const closestTr = span.closest('tr');
+    const trInfo = closestTr
+      ? { inTbody: !!closestTr.closest('tbody'), cellCount: closestTr.querySelectorAll('td, th').length,
+          dayNumberCount: closestTr.querySelectorAll('.day-number').length }
+      : null;
+
+    // How many .day-number spans exist total in #table-block vs inside tbody?
+    const totalDaySpans = tb.querySelectorAll('.day-number').length;
+    const tbodyDaySpans = tb.querySelectorAll('tbody .day-number').length;
+
+    return { chain, trInfo, totalDaySpans, tbodyDaySpans };
+  });
+  logger.info('Day-number ancestry diagnosis', { taskId, ancestry });
+
   type ScanResult = {
     error: string | null;
     properties: Array<{ name: string; cellsByDay: Array<{ day: number; text: string; className: string }> }>;
