@@ -223,7 +223,7 @@ async function scanAvailability(
     error: string | null;
     properties: Array<{ name: string; cellsByDay: Array<{ day: number; text: string }> }>;
     columns: Array<[number, number]>;
-    debug?: { theadRowCount: number; lastRowCellCount: number; bodyRowCount: number };
+    debug?: { theadRowCount: number; pickedRowCellCount: number; allRowCellCounts: number[]; bodyRowCount: number };
   };
 
   const raw: ScanResult = await page.evaluate((arg: { targetDays: number[] }): ScanResult => {
@@ -233,14 +233,22 @@ async function scanAvailability(
       return { error: 'table-block not found', properties: [], columns: [] };
     }
 
-    // Use only the LAST header row (day numbers), not all thead rows
-    // (the first rows may contain month labels with colspan, which shifts indices).
+    // Pick the thead row with the MOST cells — that's the day-numbers row.
+    // Other rows (month labels, summaries) have far fewer cells.
     const theadRows: any[] = Array.from(tableBlock.querySelectorAll('thead tr'));
-    const lastHeaderRow = theadRows[theadRows.length - 1];
-    if (!lastHeaderRow) {
+    if (theadRows.length === 0) {
       return { error: 'thead has no rows', properties: [], columns: [] };
     }
-    const headerCells: any[] = Array.from(lastHeaderRow.querySelectorAll('th, td'));
+    let dayHeaderRow = theadRows[0];
+    let maxCells = 0;
+    for (const row of theadRows) {
+      const count = row.querySelectorAll('th, td').length;
+      if (count > maxCells) {
+        maxCells = count;
+        dayHeaderRow = row;
+      }
+    }
+    const headerCells: any[] = Array.from(dayHeaderRow.querySelectorAll('th, td'));
     const dayToColumn = new Map<number, number>();
     headerCells.forEach((cell: any, i: number) => {
       const digits = (cell.textContent || '').match(/\d{1,2}/g);
@@ -279,7 +287,8 @@ async function scanAvailability(
       columns: Array.from(dayToColumn.entries()),
       debug: {
         theadRowCount: theadRows.length,
-        lastRowCellCount: headerCells.length,
+        pickedRowCellCount: headerCells.length,
+        allRowCellCounts: theadRows.map((r: any) => r.querySelectorAll('th, td').length),
         bodyRowCount: rows.length,
       },
     };
