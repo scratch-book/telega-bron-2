@@ -223,6 +223,7 @@ async function scanAvailability(
     error: string | null;
     properties: Array<{ name: string; cellsByDay: Array<{ day: number; text: string }> }>;
     columns: Array<[number, number]>;
+    debug?: { theadRowCount: number; lastRowCellCount: number; bodyRowCount: number };
   };
 
   const raw: ScanResult = await page.evaluate((arg: { targetDays: number[] }): ScanResult => {
@@ -232,9 +233,14 @@ async function scanAvailability(
       return { error: 'table-block not found', properties: [], columns: [] };
     }
 
-    const headerCells: any[] = Array.from(
-      tableBlock.querySelectorAll('thead th, thead td, [role="columnheader"]')
-    );
+    // Use only the LAST header row (day numbers), not all thead rows
+    // (the first rows may contain month labels with colspan, which shifts indices).
+    const theadRows: any[] = Array.from(tableBlock.querySelectorAll('thead tr'));
+    const lastHeaderRow = theadRows[theadRows.length - 1];
+    if (!lastHeaderRow) {
+      return { error: 'thead has no rows', properties: [], columns: [] };
+    }
+    const headerCells: any[] = Array.from(lastHeaderRow.querySelectorAll('th, td'));
     const dayToColumn = new Map<number, number>();
     headerCells.forEach((cell: any, i: number) => {
       const digits = (cell.textContent || '').match(/\d{1,2}/g);
@@ -271,6 +277,11 @@ async function scanAvailability(
       error: null,
       properties,
       columns: Array.from(dayToColumn.entries()),
+      debug: {
+        theadRowCount: theadRows.length,
+        lastRowCellCount: headerCells.length,
+        bodyRowCount: rows.length,
+      },
     };
   }, { targetDays });
 
@@ -278,7 +289,12 @@ async function scanAvailability(
     throw new Error(`Availability scan failed: ${raw.error}`);
   }
 
-  logger.info('Detected shahmatka date columns', { taskId, columns: raw.columns });
+  logger.info('Detected shahmatka date columns', {
+    taskId,
+    columns: raw.columns,
+    debug: raw.debug,
+    targetDays,
+  });
 
   const results: PropertyAvailability[] = raw.properties.map((p: ScanResult['properties'][number]) => {
     const cells = p.cellsByDay.map((c: { day: number; text: string }, i: number) => {
