@@ -219,45 +219,57 @@ async function scanAvailability(
 ): Promise<PropertyAvailability[]> {
   const targetDays = nights.map((d) => d.getDate());
 
-  // Diagnose: where do .day-number spans live in the DOM?
-  const ancestry: any = await page.evaluate(() => {
+  // Diagnose tbody row structure to understand where prices live
+  const tbodyDiag: any = await page.evaluate(() => {
     const doc = (globalThis as any).document;
     const tb = doc?.querySelector('#table-block');
     if (!tb) return { error: 'no table-block' };
-    const span = tb.querySelector('.day-number');
-    if (!span) return { error: 'no .day-number found' };
 
-    // Walk up from .day-number to #table-block
-    const chain: string[] = [];
-    let el = span;
-    while (el && el !== tb) {
-      const tag = el.tagName || '?';
-      const cls = (el.className || '').substring(0, 80);
-      const id = el.id || '';
-      chain.push(`<${tag} id="${id}" class="${cls}">`);
-      el = el.parentElement;
+    const firstRow = tb.querySelector('tbody tr');
+    if (!firstRow) return { error: 'no tbody tr' };
+
+    const cells = Array.from(firstRow.querySelectorAll('td, th')) as any[];
+    const cellInfo = cells.map((c: any, i: number) => ({
+      index: i,
+      tag: c.tagName,
+      className: (c.className || '').substring(0, 80),
+      childCount: c.children.length,
+      childTags: Array.from(c.children).slice(0, 5).map((ch: any) =>
+        `<${ch.tagName} class="${(ch.className || '').substring(0, 50)}">`
+      ),
+      textSnippet: (c.textContent || '').substring(0, 100),
+      innerHTML: (c.innerHTML || '').substring(0, 300),
+    }));
+
+    // Check if prices exist anywhere in tbody
+    const pricesInTbody = tb.querySelectorAll('tbody .price').length;
+
+    // Check for any elements with numeric content in the second cell
+    const secondCell = cells[1];
+    let numericChildCount = 0;
+    if (secondCell) {
+      const allChildren = secondCell.querySelectorAll('*');
+      for (const ch of Array.from(allChildren) as any[]) {
+        const t = (ch.textContent || '').trim();
+        if (/^\d+$/.test(t.replace(/\s/g, ''))) numericChildCount++;
+      }
     }
 
-    // Also find the closest <tr> ancestor of the span (if any)
-    const closestTr = span.closest('tr');
-    const trInfo = closestTr
-      ? { inTbody: !!closestTr.closest('tbody'), cellCount: closestTr.querySelectorAll('td, th').length,
-          dayNumberCount: closestTr.querySelectorAll('.day-number').length }
-      : null;
-
-    // How many .day-number spans exist total in #table-block vs inside tbody?
-    const totalDaySpans = tb.querySelectorAll('.day-number').length;
-    const tbodyDaySpans = tb.querySelectorAll('tbody .day-number').length;
-
-    return { chain, trInfo, totalDaySpans, tbodyDaySpans };
+    return { cellInfo, pricesInTbody, numericChildCount };
   });
-  logger.info('Day-number ancestry diagnosis', { taskId, ancestry });
+  logger.info('Tbody row structure', { taskId, tbodyDiag });
 
   type ScanResult = {
     error: string | null;
     properties: Array<{ name: string; cellsByDay: Array<{ day: number; text: string; className: string }> }>;
     debug?: any;
   };
+
+  // The shahmatka DOM structure:
+  //   thead.thead-days > tr > th (per month) > div.day-block > label.day-item > span.day-number
+  // The day blocks in the header are in the SAME positional order as the data cells in tbody.
+  // Build an index: for each target day, find its sequential position among ALL .day-block elements.
+  // Then in each tbody row, find the child element at that same position.
 
   const raw: ScanResult = await page.evaluate((arg: { targetDays: number[] }): ScanResult => {
     const doc: any = (globalThis as any).document;
@@ -266,43 +278,57 @@ async function scanAvailability(
       return { error: 'table-block not found', properties: [] };
     }
 
+    // 1) Build day-index from header: enumerate all .day-number in thead order
+    const headerDaySpans: any[] = Array.from(
+      tableBlock.querySelectorAll('thead.thead-days .day-number, thead .day-number')
+    );
+    const dayToIndex = new Map<number, number>();
+    headerDaySpans.forEach((span: any, i: number) => {
+      const n = parseInt((span.textContent || '').trim(), 10);
+      // Use first occurrence only (to handle month boundaries)
+      if (!isNaN(n) && !dayToIndex.has(n)) {
+        dayToIndex.set(n, i);
+      }
+    });
+
+    // 2) For each tbody row, extract the property name and find day cells
     const rows: any[] = Array.from(tableBlock.querySelectorAll('tbody tr'));
     const properties: ScanResult['properties'] = [];
 
     for (const row of rows) {
-      // Property name is in the first cell
       const firstCell: any = row.querySelector('td, th');
       if (!firstCell) continue;
-      // Exclude "mail_outline" icon text from the name
-      const nameEl = firstCell.querySelector('.object-name, a') || firstCell;
-      let nameText = (nameEl.textContent || '').trim().replace(/\s+/g, ' ');
-      // Strip trailing material icon text
+      let nameText = (firstCell.textContent || '').trim().replace(/\s+/g, ' ');
       nameText = nameText.replace(/mail_outline$/, '').trim();
       if (!nameText) continue;
 
-      // Find all day cells within this row by looking for .day-number spans
-      const daySpans: any[] = Array.from(row.querySelectorAll('.day-number'));
+      // Get all potential day-data cells in this row (skip the name cell)
+      // These could be divs, spans, or td elements inside the second cell
+      const allCells: any[] = Array.from(row.querySelectorAll('td, th'));
+      const dataContainer = allCells.length > 1 ? allCells[1] : null;
+
+      // Try multiple strategies to find day data cells
+      let dayCells: any[] = [];
+      if (dataContainer) {
+        // Strategy 1: look for .day-block or similar children
+        dayCells = Array.from(dataContainer.querySelectorAll('.day-block, .day-item, [class*="day-cell"], [class*="cell-day"]'));
+        // Strategy 2: if no day-specific elements, use direct children
+        if (dayCells.length === 0) {
+          dayCells = Array.from(dataContainer.children);
+        }
+      }
+
       const cellsByDay = arg.targetDays.map((day: number) => {
-        // Find the span whose text matches the target day
-        const span = daySpans.find((s: any) => {
-          const t = (s.textContent || '').trim();
-          return parseInt(t, 10) === day;
-        });
+        const idx = dayToIndex.get(day);
+        if (idx === undefined) return { day, text: '', className: 'day-not-in-header' };
+        if (idx >= dayCells.length) return { day, text: '', className: `idx-${idx}-of-${dayCells.length}` };
 
-        if (!span) return { day, text: '', className: '' };
-
-        // The price/cell info is in the parent element of the day-number span
-        const cell = span.closest('[class*="cell"], [class*="day"], td') || span.parentElement;
-        if (!cell) return { day, text: '', className: '' };
-
-        const className = (cell.className || '').substring(0, 100);
-
-        // Look for a .price element in the same cell
-        const priceEl = cell.querySelector('.price');
+        const cell = dayCells[idx];
+        const className = (cell?.className || '').substring(0, 100);
+        const priceEl = cell?.querySelector('.price');
         const text = priceEl
           ? (priceEl.textContent || '').trim()
-          : (cell.textContent || '').replace((span.textContent || ''), '').trim();
-
+          : (cell?.textContent || '').trim();
         return { day, text, className };
       });
 
@@ -312,7 +338,11 @@ async function scanAvailability(
     return {
       error: null,
       properties,
-      debug: { bodyRowCount: rows.length },
+      debug: {
+        headerDaySpanCount: headerDaySpans.length,
+        dayToIndex: Array.from(dayToIndex.entries()),
+        bodyRowCount: rows.length,
+      },
     };
   }, { targetDays });
 
@@ -320,7 +350,11 @@ async function scanAvailability(
     throw new Error(`Availability scan failed: ${raw.error}`);
   }
 
-  logger.info('Shahmatka scan result', { taskId, targetDays, debug: raw.debug });
+  logger.info('Shahmatka scan result', {
+    taskId,
+    targetDays,
+    debug: raw.debug,
+  });
 
   const results: PropertyAvailability[] = raw.properties.map((p) => {
     const cells = p.cellsByDay.map((c, i) => {
