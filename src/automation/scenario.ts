@@ -226,7 +226,7 @@ async function scanAvailability(
 
   type ScanResult = {
     error: string | null;
-    properties: Array<{ name: string; cellsByDay: Array<{ day: number; spanIdx: number; text: string; className: string; allText: string }> }>;
+    properties: Array<{ name: string; cellsByDay: Array<{ day: number; spanIdx: number; text: string; className: string; allText: string; coveredBy: string }> }>;
     debug?: any;
   };
 
@@ -293,7 +293,11 @@ async function scanAvailability(
       }
     }
 
-    // 5) Scan body rows — cell-blocks are a flat list aligned to the header spans
+    // 5) Scan body rows — cell-blocks are a flat list aligned to the header spans.
+    //    IMPORTANT: Bookings in the shahmatka are shown as CSS overlay bars.
+    //    Only the FIRST cell of a booking gets class "type-event"; subsequent cells
+    //    remain "type-empty" even though they're visually covered by the booking bar.
+    //    We detect these overlays via bounding-box intersection.
     const rows: any[] = Array.from(tableBlock.querySelectorAll('tbody tr'));
     const properties: ScanResult['properties'] = [];
 
@@ -306,21 +310,76 @@ async function scanAvailability(
 
       const cellBlocks: any[] = Array.from(row.querySelectorAll('.cell-block'));
 
+      // Build booked horizontal ranges from event overlay elements.
+      // Strategy: find all type-event cells and their descendants that extend
+      // beyond the cell width (booking bars), plus any non-cell-block siblings
+      // in the cell-row that could be overlay bars.
+      const bookedRanges: Array<{ left: number; right: number; src: string }> = [];
+
+      for (const block of cellBlocks) {
+        const cls = (block.className || '') as string;
+        if (!cls.includes('type-event')) continue;
+        const cellRect = block.getBoundingClientRect();
+        // The event cell itself is booked
+        if (cellRect.width > 0) {
+          bookedRanges.push({ left: cellRect.left, right: cellRect.right, src: 'type-event-cell' });
+        }
+        // Check ALL descendants for elements wider than the cell (event bars extending over multiple cells)
+        const descendants: any[] = Array.from(block.querySelectorAll('*'));
+        for (const desc of descendants) {
+          const descRect = desc.getBoundingClientRect();
+          if (descRect.width > cellRect.width * 1.2) {
+            bookedRanges.push({ left: descRect.left, right: descRect.right, src: 'event-bar-child' });
+          }
+        }
+      }
+
+      // Also check for non-cell-block children of the cell-row (event overlay siblings)
+      const cellRow = row.querySelector('.cell-row');
+      if (cellRow) {
+        const rowChildren: any[] = Array.from(cellRow.children);
+        for (const child of rowChildren) {
+          const childCls = (child.className || '') as string;
+          if (childCls.includes('cell-block')) continue;
+          const childRect = child.getBoundingClientRect();
+          if (childRect.width > 0) {
+            bookedRanges.push({
+              left: childRect.left,
+              right: childRect.right,
+              src: 'cellrow-sibling:' + childCls.substring(0, 60),
+            });
+          }
+        }
+      }
+
       const cellsByDay = arg.targetDays.map((day: number) => {
         const spanIdx = dayToSpanIdx.get(day);
-        if (spanIdx === undefined) return { day, spanIdx: -1, text: '', className: 'day-not-in-header', allText: '' };
+        if (spanIdx === undefined) return { day, spanIdx: -1, text: '', className: 'day-not-in-header', allText: '', coveredBy: '' };
 
         if (spanIdx >= cellBlocks.length) {
-          return { day, spanIdx, text: '', className: `idx-${spanIdx}-of-${cellBlocks.length}`, allText: '' };
+          return { day, spanIdx, text: '', className: `idx-${spanIdx}-of-${cellBlocks.length}`, allText: '', coveredBy: '' };
         }
 
         const block = cellBlocks[spanIdx];
         const className = (block?.className || '').substring(0, 200);
         const priceEl = block?.querySelector('.price');
         const text = priceEl ? (priceEl.textContent || '').trim() : '';
-        // Also capture ALL visible text inside the cell-block for diagnostics
         const allText = (block?.textContent || '').trim().substring(0, 100);
-        return { day, spanIdx, text, className, allText };
+
+        // Check if this cell is visually covered by a booking overlay
+        let coveredBy = '';
+        const cellRect = block.getBoundingClientRect();
+        if (cellRect.width > 0) {
+          const centerX = cellRect.left + cellRect.width / 2;
+          for (const range of bookedRanges) {
+            if (range.left <= centerX && range.right >= centerX) {
+              coveredBy = range.src;
+              break;
+            }
+          }
+        }
+
+        return { day, spanIdx, text, className, allText, coveredBy };
       });
 
       properties.push({ name: nameText, cellsByDay });
@@ -338,6 +397,25 @@ async function scanAvailability(
           cls: (b?.className || '').substring(0, 100),
           txt: (b?.textContent || '').trim().substring(0, 50),
         });
+      }
+    }
+
+    // Diagnostic: dump non-cell-block children of first row's cell-row
+    const firstRowOverlays: Array<{ tag: string; cls: string; width: number }> = [];
+    if (rows[0]) {
+      const cr = rows[0].querySelector('.cell-row');
+      if (cr) {
+        const children: any[] = Array.from(cr.children);
+        for (const child of children) {
+          const cls = (child.className || '') as string;
+          if (cls.includes('cell-block')) continue;
+          const rect = child.getBoundingClientRect();
+          firstRowOverlays.push({
+            tag: child.tagName?.toLowerCase() || '?',
+            cls: cls.substring(0, 100),
+            width: Math.round(rect.width),
+          });
+        }
       }
     }
 
@@ -366,6 +444,7 @@ async function scanAvailability(
         })),
         bodyRowCount: rows.length,
         firstRowCellBlocks: rows[0] ? rows[0].querySelectorAll('.cell-block').length : 0,
+        firstRowOverlays,
         diagCellsAroundTarget: diagCells,
       },
     };
@@ -384,7 +463,9 @@ async function scanAvailability(
       // Occupied cells (type-booked, type-reserved, etc.) may also show a price but are NOT free.
       const hasEmptyType = (c.className || '').includes('type-empty');
       const hasPrice = isCellFree(c.text);
-      const free = hasEmptyType && hasPrice;
+      const coveredByBooking = !!c.coveredBy;
+      // Free = has type-empty class, has numeric price, AND is NOT covered by a booking overlay
+      const free = hasEmptyType && hasPrice && !coveredByBooking;
       logger.info('Cell detail', {
         taskId,
         property: p.name,
@@ -395,6 +476,7 @@ async function scanAvailability(
         allText: c.allText,
         hasEmptyType,
         hasPrice,
+        coveredBy: c.coveredBy || 'none',
         free,
       });
       return { date: dateStr, text: c.text, free };
