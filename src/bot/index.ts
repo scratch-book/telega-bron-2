@@ -289,23 +289,12 @@ async function startTask(ctx: Context, request: BookingRequest): Promise<void> {
         if (status === 'running') {
           await ctx.telegram.sendMessage(chatId, `⏳ Задача ${taskId}: выполняется...`);
         } else if (status === 'completed' && result?.success) {
-          if (result.availableProperties && result.availableProperties.length > 0 && !result.bookingUrl) {
-            const list = result.availableProperties.map((n, i) => `${i + 1}. ${n}`).join('\n');
-            const message =
-              `🔎 Задача ${taskId}: найдено несколько свободных квартир.\n\n` +
-              `Даты: ${request.checkInDate} – ${request.checkOutDate}\n\n` +
-              `${list}\n\n` +
-              `Повторите команду с нужным объектом, например:\n` +
-              `/book ${result.availableProperties[0]} ${request.checkInDate} ${request.checkOutDate}`;
-            await ctx.telegram.sendMessage(chatId, message);
-            if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
-              await ctx.telegram.sendPhoto(chatId, { source: fs.createReadStream(result.screenshotPath) });
-            }
-            return;
-          }
+          const properties = result.availableProperties && result.availableProperties.length > 0
+            ? result.availableProperties.join(', ')
+            : result.request.objectId || request.objectId;
           let message =
-            `✅ Задача ${taskId}: выполнено успешно!\n\n` +
-            `Объект: ${result.request.objectId || request.objectId}\n` +
+            `✅ Задача ${taskId}: выполнено!\n\n` +
+            `Объект: ${properties}\n` +
             `Даты: ${request.checkInDate} – ${request.checkOutDate}\n\n` +
             `Ссылка: ${result.bookingUrl}`;
 

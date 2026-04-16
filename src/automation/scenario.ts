@@ -328,25 +328,29 @@ async function saveShahmatkaErrorSnapshot(page: Page, taskId: string, step: stri
   }
 }
 
-async function openPropertyCart(page: Page, objectId: string): Promise<void> {
-  const safeName = escapeRegExp(objectId);
+/** Click the mail_outline icon on a single property row to toggle it into the cart. */
+async function togglePropertyInCart(page: Page, objectName: string, taskId: string): Promise<void> {
   const tableBlock = page.locator('#table-block');
+  const safeName = escapeRegExp(objectName);
 
-  const row = tableBlock.locator('tr, [role="row"]').filter({
+  const row = tableBlock.locator('tr').filter({
     hasText: new RegExp(safeName, 'i'),
   }).first();
 
   try {
     await row.waitFor({ state: 'visible', timeout: TIMEOUT });
   } catch {
-    throw new Error(`Object "${objectId}" not found in RealtyCalendar table after ${TIMEOUT}ms`);
+    throw new Error(`Object "${objectName}" not found in table after ${TIMEOUT}ms`);
   }
 
-  await row.getByText('mail_outline', { exact: true }).first().click();
-  logger.info('Clicked object mail icon', { objectId });
+  await row.locator('[data-test-name="row-cart-toggle"]').first().click();
+  logger.info('Toggled property into cart', { taskId, objectName });
+}
 
-  await page.getByRole('button', { name: /Корзина/i }).click();
-  logger.info('Clicked cart button', { objectId });
+/** Open the header Cart button. */
+async function openCart(page: Page, taskId: string): Promise<void> {
+  await page.locator('[data-test-name="header-cart"]').click();
+  logger.info('Opened cart', { taskId });
 }
 
 async function getCartModal(page: Page): Promise<Locator> {
@@ -470,9 +474,9 @@ export async function runBookingScenario(
       freeNames: free.map((a) => a.name),
     });
 
-    // --- Decide target property ---
+    // --- Decide target properties ---
     const requestedName = (request.objectId ?? '').trim();
-    let targetName: string | null = null;
+    let targetNames: string[];
 
     if (requestedName) {
       const match = free.find((a) =>
@@ -485,33 +489,23 @@ export async function runBookingScenario(
           `Свободные варианты: ${free.map((a) => a.name).join(', ') || 'нет'}`
         );
       }
-      targetName = match.name;
+      targetNames = [match.name];
     } else if (free.length === 0) {
       await saveShahmatkaErrorSnapshot(page, taskId, 'no_free_properties');
       throw new Error('Нет свободных квартир на указанные даты.');
-    } else if (free.length === 1) {
-      targetName = free[0].name;
-      logger.info('Single free property auto-selected', { taskId, targetName });
     } else {
-      // Multiple free: return the list, don't book.
-      const screenshotPath = getScreenshotPath(taskId);
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-      await context.close();
-      return {
-        taskId,
-        success: true,
-        availableProperties: free.map((a) => a.name),
-        screenshotPath,
-        request,
-        startedAt,
-        completedAt: new Date(),
-      };
+      targetNames = free.map((a) => a.name);
+      logger.info('Free properties selected', { taskId, targetNames });
     }
 
-    // --- Booking flow for the chosen property ---
-    logger.info('Opening property cart', { taskId, targetName });
-    await openPropertyCart(page, targetName);
-    await saveDebugSnapshot(page, taskId, 'property_cart_opened');
+    // --- Add all target properties to cart ---
+    for (const name of targetNames) {
+      await togglePropertyInCart(page, name, taskId);
+    }
+    await saveDebugSnapshot(page, taskId, 'properties_toggled');
+
+    await openCart(page, taskId);
+    await saveDebugSnapshot(page, taskId, 'cart_opened');
 
     const cartModal = await getCartModal(page);
     await saveDebugSnapshot(page, taskId, 'cart_modal_visible');
@@ -524,10 +518,6 @@ export async function runBookingScenario(
     await setCartDate(cartModal, 0, request.checkInDate);
     await setCartDate(cartModal, 1, request.checkOutDate);
     await saveDebugSnapshot(page, taskId, 'dates_set');
-
-    await cartModal.getByRole('button', { name: 'Добавить', exact: true }).click();
-    logger.info('Clicked add button in cart modal', { taskId });
-    await saveDebugSnapshot(page, taskId, 'after_add');
 
     await cartModal.getByRole('button', { name: /Получить ссылку/i }).click();
     logger.info('Clicked get link button in cart modal', { taskId });
@@ -562,12 +552,13 @@ export async function runBookingScenario(
       success: true,
       bookingUrl,
       screenshotPath,
-      request: { ...request, objectId: targetName },
+      request: { ...request, objectId: targetNames.join(', ') },
+      availableProperties: targetNames,
       startedAt,
       completedAt: new Date(),
     };
 
-    logger.info('Booking scenario completed successfully', { taskId, bookingUrl, targetName });
+    logger.info('Booking scenario completed successfully', { taskId, bookingUrl, targetNames });
     return result;
   } catch (error: any) {
     logger.error('Booking scenario failed', { taskId, error: error.message, stack: error.stack });
