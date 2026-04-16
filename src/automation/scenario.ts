@@ -298,7 +298,10 @@ async function scanAvailability(
   const results: PropertyAvailability[] = raw.properties.map((p) => {
     const cells = p.cellsByDay.map((c, i) => {
       const dateStr = formatDDMMYYYY(nights[i]);
-      const free = isCellFree(c.text);
+      // A cell is free only if it has class "type-empty" AND contains a numeric price.
+      // Occupied cells (type-booked, type-reserved, etc.) may also show a price but are NOT free.
+      const hasEmptyType = (c.className || '').includes('type-empty');
+      const free = hasEmptyType && isCellFree(c.text);
       return { date: dateStr, text: c.text, free };
     });
     const unavailableReason = cells.find((c) => !c.free);
