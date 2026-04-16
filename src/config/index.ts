@@ -14,9 +14,6 @@ function requireEnv(name: string): string {
 export const config = {
   telegram: {
     botToken: requireEnv('TELEGRAM_BOT_TOKEN'),
-    allowedUserIds: requireEnv('ALLOWED_USER_IDS')
-      .split(',')
-      .map((id) => parseInt(id.trim(), 10)),
   },
   realtyCalendar: {
     login: requireEnv('RC_LOGIN'),

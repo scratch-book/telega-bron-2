@@ -5,17 +5,10 @@ import { runDemoScenario } from '../demo/demo-scenario';
 import { saveTask } from './storage';
 import { logger } from './logger';
 
-// Simple mutex: only one automation task at a time
-let isRunning = false;
-
 export async function createAndRunTask(
   request: BookingRequest,
   onStatusUpdate: (taskId: string, status: string, result?: TaskResult) => void
 ): Promise<void> {
-  if (isRunning) {
-    throw new Error('Another task is already running. Please wait for it to finish.');
-  }
-
   const taskId = uuidv4().slice(0, 8);
 
   const taskInfo: TaskInfo = {
@@ -30,7 +23,6 @@ export async function createAndRunTask(
   onStatusUpdate(taskId, 'pending');
 
   // Run the automation
-  isRunning = true;
   taskInfo.status = 'running';
   saveTask(taskInfo);
   onStatusUpdate(taskId, 'running');
@@ -55,8 +47,6 @@ export async function createAndRunTask(
     taskInfo.result = result;
     saveTask(taskInfo);
     onStatusUpdate(taskId, 'error', result);
-  } finally {
-    isRunning = false;
   }
 }
 
@@ -64,16 +54,11 @@ export async function createAndRunDemoTask(
   request: BookingRequest,
   onStatusUpdate: (taskId: string, status: string, result?: TaskResult) => void
 ): Promise<void> {
-  if (isRunning) {
-    throw new Error('Another task is already running. Please wait for it to finish.');
-  }
-
   const taskId = 'demo-' + uuidv4().slice(0, 6);
 
   logger.info('Demo task created', { taskId, request });
   onStatusUpdate(taskId, 'pending');
 
-  isRunning = true;
   onStatusUpdate(taskId, 'running');
 
   try {
@@ -90,7 +75,5 @@ export async function createAndRunDemoTask(
       completedAt: new Date(),
     };
     onStatusUpdate(taskId, 'error', result);
-  } finally {
-    isRunning = false;
   }
 }

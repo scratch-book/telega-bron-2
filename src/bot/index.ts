@@ -35,23 +35,8 @@ function resetState(userId: number): void {
   conversations.set(userId, { step: 'idle', data: {} });
 }
 
-function isAuthorized(userId: number): boolean {
-  return config.telegram.allowedUserIds.includes(userId);
-}
-
 export function createBot(): Telegraf {
   const bot = new Telegraf(config.telegram.botToken);
-
-  // Middleware: check authorization
-  bot.use(async (ctx, next) => {
-    const userId = ctx.from?.id;
-    if (!userId || !isAuthorized(userId)) {
-      logger.warn('Unauthorized access attempt', { userId, username: ctx.from?.username });
-      await ctx.reply('Доступ запрещен. Обратитесь к администратору.');
-      return;
-    }
-    return next();
-  });
 
   // /start command
   bot.start(async (ctx) => {
