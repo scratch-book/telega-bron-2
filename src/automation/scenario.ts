@@ -219,45 +219,54 @@ async function scanAvailability(
 ): Promise<PropertyAvailability[]> {
   const targetDays = nights.map((d) => d.getDate());
 
-  // Diagnose tbody row structure to understand where prices live
-  const tbodyDiag: any = await page.evaluate(() => {
+  // Diagnose: find where prices live by searching for elements with "3000"-like text
+  const priceDiag: any = await page.evaluate(() => {
     const doc = (globalThis as any).document;
     const tb = doc?.querySelector('#table-block');
     if (!tb) return { error: 'no table-block' };
 
-    const firstRow = tb.querySelector('tbody tr');
-    if (!firstRow) return { error: 'no tbody tr' };
+    // Find .price elements anywhere in #table-block
+    const priceEls = Array.from(tb.querySelectorAll('.price')) as any[];
+    const priceInfo = priceEls.slice(0, 3).map((el: any) => {
+      // Walk up to #table-block and record ancestor chain
+      const chain: string[] = [];
+      let node = el;
+      while (node && node !== tb) {
+        chain.push(`<${node.tagName} class="${(node.className || '').substring(0, 60)}">`);
+        node = node.parentElement;
+      }
+      return {
+        text: (el.textContent || '').trim().substring(0, 20),
+        chain,
+      };
+    });
 
-    const cells = Array.from(firstRow.querySelectorAll('td, th')) as any[];
-    const cellInfo = cells.map((c: any, i: number) => ({
-      index: i,
-      tag: c.tagName,
-      className: (c.className || '').substring(0, 80),
-      childCount: c.children.length,
-      childTags: Array.from(c.children).slice(0, 5).map((ch: any) =>
-        `<${ch.tagName} class="${(ch.className || '').substring(0, 50)}">`
-      ),
-      textSnippet: (c.textContent || '').substring(0, 100),
-      innerHTML: (c.innerHTML || '').substring(0, 300),
-    }));
-
-    // Check if prices exist anywhere in tbody
-    const pricesInTbody = tb.querySelectorAll('tbody .price').length;
-
-    // Check for any elements with numeric content in the second cell
-    const secondCell = cells[1];
-    let numericChildCount = 0;
-    if (secondCell) {
-      const allChildren = secondCell.querySelectorAll('*');
-      for (const ch of Array.from(allChildren) as any[]) {
-        const t = (ch.textContent || '').trim();
-        if (/^\d+$/.test(t.replace(/\s/g, ''))) numericChildCount++;
+    // If no .price, look for any element with 4-digit numeric text
+    let numericSamples: any[] = [];
+    if (priceEls.length === 0) {
+      const all = tb.querySelectorAll('*');
+      for (const el of Array.from(all) as any[]) {
+        if (el.children.length > 0) continue; // leaf nodes only
+        const t = (el.textContent || '').trim().replace(/\s/g, '');
+        if (/^\d{3,5}$/.test(t) && numericSamples.length < 3) {
+          const chain: string[] = [];
+          let node = el;
+          while (node && node !== tb) {
+            chain.push(`<${node.tagName} class="${(node.className || '').substring(0, 60)}">`);
+            node = node.parentElement;
+          }
+          numericSamples.push({ text: t, chain });
+        }
       }
     }
 
-    return { cellInfo, pricesInTbody, numericChildCount };
+    return {
+      priceCount: priceEls.length,
+      priceInfo,
+      numericSamples,
+    };
   });
-  logger.info('Tbody row structure', { taskId, tbodyDiag });
+  logger.info('Price location diagnosis', { taskId, priceDiag });
 
   type ScanResult = {
     error: string | null;
