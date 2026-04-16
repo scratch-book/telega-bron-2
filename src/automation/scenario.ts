@@ -226,7 +226,7 @@ async function scanAvailability(
 
   type ScanResult = {
     error: string | null;
-    properties: Array<{ name: string; cellsByDay: Array<{ day: number; spanIdx: number; text: string; className: string; allText: string; coveredBy: string; cellDivChildInfo: string }> }>;
+    properties: Array<{ name: string; cellsByDay: Array<{ day: number; spanIdx: number; text: string; className: string; allText: string; coveredBy: string; matchMethod: string }> }>;
     debug?: any;
   };
 
@@ -294,13 +294,14 @@ async function scanAvailability(
     }
 
     // 5) Scan body rows.
-    //    DOM structure: div.cell-row contains:
-    //      - div.cell × 60 (CSS grid columns, one per day — NOT bookings)
-    //      - div.cell-block × 48 (content blocks: prices / events)
-    //    Only the FIRST cell of a booking gets class "type-event"; subsequent cells
-    //    remain "type-empty" even though visually covered by a booking bar.
-    //    We detect multi-cell bookings by checking the width of child elements
-    //    inside type-event cell-blocks (the booking bar extends beyond the cell).
+    //    DOM: div.cell-row contains:
+    //      - div.cell × 60 (CSS grid columns, one per day, ~30px each)
+    //      - div.cell-block × N (variable-width content segments)
+    //    CRITICAL: cell-blocks are NOT one-per-day! A booking (type-event) cell-block
+    //    spans multiple days (~208px = ~7 days). So cellBlocks[spanIdx] does NOT
+    //    correspond to the target day. We must match by BOUNDING BOX position:
+    //    find the .cell grid div for the target day, get its X coordinate,
+    //    then find which cell-block overlaps that position.
     const rows: any[] = Array.from(tableBlock.querySelectorAll('tbody tr'));
     const properties: ScanResult['properties'] = [];
 
@@ -313,153 +314,106 @@ async function scanAvailability(
 
       const cellBlocks: any[] = Array.from(row.querySelectorAll('.cell-block'));
 
-      // Build set of booked cell-block indices.
-      // 1) Direct: cell-blocks with type-event / type-booked are booked.
-      // 2) Span: if a type-event cell's child element is wider than the cell,
-      //    it's a booking bar spanning multiple days — mark subsequent indices.
-      const bookedIndices = new Set<number>();
-
-      for (let i = 0; i < cellBlocks.length; i++) {
-        const cls = (cellBlocks[i].className || '') as string;
-        if (!cls.includes('type-event') && !cls.includes('type-booked')) continue;
-        bookedIndices.add(i);
-
-        const cellWidth = cellBlocks[i].getBoundingClientRect().width || cellBlocks[i].offsetWidth;
-        if (cellWidth <= 0) continue;
-
-        // Check all descendants for elements wider than the cell (booking bars)
-        const descendants: any[] = Array.from(cellBlocks[i].querySelectorAll('*'));
-        for (const desc of descendants) {
-          // Use the largest of: rendered width, scrollWidth, parsed CSS width
-          const descRect = desc.getBoundingClientRect();
-          let maxW = Math.max(descRect.width, desc.scrollWidth || 0);
-          const styleW = desc.style?.width || '';
-          if (styleW.endsWith('px')) {
-            maxW = Math.max(maxW, parseFloat(styleW) || 0);
-          } else if (styleW.endsWith('%')) {
-            maxW = Math.max(maxW, (parseFloat(styleW) || 0) / 100 * cellWidth);
-          }
-
-          if (maxW > cellWidth * 1.5) {
-            const span = Math.round(maxW / cellWidth);
-            for (let j = 1; j < span && (i + j) < cellBlocks.length; j++) {
-              bookedIndices.add(i + j);
-            }
-            break;
-          }
-        }
-      }
-
-      // Also check: .cell grid divs may contain booking elements.
-      // The .cell divs (60, one per day) are siblings of .cell-block divs.
-      // If a .cell div at position N has children, that day may have a booking.
+      // Collect .cell grid divs (one per day, reliable positional reference)
       const cellRow = row.querySelector('.cell-row');
       const cellGridDivs: any[] = [];
       if (cellRow) {
         for (const child of Array.from(cellRow.children) as any[]) {
           const cls = (child.className || '') as string;
-          // Match exactly "cell" class, not "cell-block" or "cell-row"
-          if (cls.split(/\s+/).includes('cell')) {
+          if (cls.split(/\s+/).includes('cell') && !cls.includes('cell-block') && !cls.includes('cell-row')) {
             cellGridDivs.push(child);
           }
         }
       }
 
+      // Pre-compute bounding boxes of all cell-blocks for fast lookup
+      const blockRects: Array<{ left: number; right: number; block: any }> = cellBlocks.map((b: any) => {
+        const r = b.getBoundingClientRect();
+        return { left: r.left, right: r.right, block: b };
+      });
+
       const cellsByDay = arg.targetDays.map((day: number) => {
         const spanIdx = dayToSpanIdx.get(day);
-        if (spanIdx === undefined) return { day, spanIdx: -1, text: '', className: 'day-not-in-header', allText: '', coveredBy: '', cellDivChildInfo: '' };
+        if (spanIdx === undefined) return { day, spanIdx: -1, text: '', className: 'day-not-in-header', allText: '', coveredBy: '', matchMethod: 'none' };
 
-        if (spanIdx >= cellBlocks.length) {
-          return { day, spanIdx, text: '', className: `idx-${spanIdx}-of-${cellBlocks.length}`, allText: '', coveredBy: '', cellDivChildInfo: '' };
+        // Get the .cell grid div for this day (reliable 1:1 mapping with header spans)
+        const cellDiv = spanIdx < cellGridDivs.length ? cellGridDivs[spanIdx] : null;
+        if (!cellDiv) {
+          return { day, spanIdx, text: '', className: 'no-cell-div', allText: '', coveredBy: '', matchMethod: 'none' };
         }
 
-        const block = cellBlocks[spanIdx];
-        const className = (block?.className || '').substring(0, 200);
-        const priceEl = block?.querySelector('.price');
-        const text = priceEl ? (priceEl.textContent || '').trim() : '';
-        const allText = (block?.textContent || '').trim().substring(0, 100);
+        const cellDivRect = cellDiv.getBoundingClientRect();
+        const centerX = cellDivRect.left + cellDivRect.width / 2;
 
-        // Detection method 1: bookedIndices (type-event + span detection)
-        let coveredBy = '';
-        if (bookedIndices.has(spanIdx)) {
-          coveredBy = 'event-span';
-        }
-
-        // Detection method 2: check .cell grid div at this index for children
-        // (booking bars might be rendered inside .cell containers)
-        let cellDivChildInfo = '';
-        if (spanIdx < cellGridDivs.length) {
-          const cd = cellGridDivs[spanIdx];
-          if (cd.children.length > 0) {
-            const firstChildCls = (cd.children[0]?.className || '').substring(0, 80);
-            const firstChildHtml = cd.innerHTML.substring(0, 200);
-            cellDivChildInfo = `${cd.children.length}ch:${firstChildCls}|${firstChildHtml}`;
+        // Find the cell-block whose bounding box contains this day's X position
+        let matchingBlock: any = null;
+        let matchIdx = -1;
+        for (let i = 0; i < blockRects.length; i++) {
+          const br = blockRects[i];
+          if (br.left <= centerX && br.right > centerX) {
+            matchingBlock = br.block;
+            matchIdx = i;
+            break;
           }
         }
 
-        return { day, spanIdx, text, className, allText, coveredBy, cellDivChildInfo };
+        if (!matchingBlock) {
+          return { day, spanIdx, text: '', className: 'no-matching-block', allText: '', coveredBy: '', matchMethod: `centerX=${Math.round(centerX)}` };
+        }
+
+        const className = (matchingBlock.className || '').substring(0, 200);
+        const priceEl = matchingBlock.querySelector('.price');
+        const text = priceEl ? (priceEl.textContent || '').trim() : '';
+        const allText = (matchingBlock.textContent || '').trim().substring(0, 100);
+        const blockWidth = Math.round(matchingBlock.getBoundingClientRect().width);
+
+        return {
+          day,
+          spanIdx,
+          text,
+          className,
+          allText,
+          coveredBy: '',
+          matchMethod: `bbox:blockIdx=${matchIdx},blockW=${blockWidth}px`,
+        };
       });
 
       properties.push({ name: nameText, cellsByDay });
     }
 
-    // Diagnostic: cell-blocks around target for first row
-    const diagCells: Array<{ idx: number; cls: string; txt: string; innerHTML: string }> = [];
-    if (rows[0] && targetSection) {
+    // Diagnostic: ALL cell-blocks in first row with their bounding boxes
+    const diagAllBlocks: Array<{ idx: number; cls: string; left: number; width: number; txt: string }> = [];
+    if (rows[0]) {
       const firstRowBlocks: any[] = Array.from(rows[0].querySelectorAll('.cell-block'));
-      const sampleIdx = dayToSpanIdx.get(arg.targetDays[0]) ?? 0;
-      for (let i = Math.max(0, sampleIdx - 3); i <= Math.min(firstRowBlocks.length - 1, sampleIdx + 5); i++) {
+      for (let i = 0; i < firstRowBlocks.length; i++) {
         const b = firstRowBlocks[i];
-        diagCells.push({
+        const r = b.getBoundingClientRect();
+        diagAllBlocks.push({
           idx: i,
-          cls: (b?.className || '').substring(0, 100),
-          txt: (b?.textContent || '').trim().substring(0, 50),
-          innerHTML: (b?.innerHTML || '').substring(0, 200),
+          cls: (b.className || '').replace('cell-block ', '').substring(0, 30),
+          left: Math.round(r.left),
+          width: Math.round(r.width),
+          txt: (b.textContent || '').trim().substring(0, 20),
         });
       }
     }
 
-    // Diagnostic: .cell grid divs around target for first row
-    const diagCellDivs: Array<{ idx: number; childCount: number; innerHTML: string }> = [];
+    // Diagnostic: .cell grid divs positions for first row (sample around target)
+    const diagGridCells: Array<{ idx: number; left: number; width: number }> = [];
     if (rows[0]) {
       const cr = rows[0].querySelector('.cell-row');
       if (cr) {
         const gridCells: any[] = [];
         for (const child of Array.from(cr.children) as any[]) {
           const cls = (child.className || '') as string;
-          if (cls.split(/\s+/).includes('cell')) gridCells.push(child);
+          if (cls.split(/\s+/).includes('cell') && !cls.includes('cell-block')) gridCells.push(child);
         }
         const sampleIdx = dayToSpanIdx.get(arg.targetDays[0]) ?? 0;
         for (let i = Math.max(0, sampleIdx - 2); i <= Math.min(gridCells.length - 1, sampleIdx + 4); i++) {
           const cd = gridCells[i];
-          diagCellDivs.push({
-            idx: i,
-            childCount: cd.children.length,
-            innerHTML: cd.innerHTML.substring(0, 300),
-          });
+          const r = cd.getBoundingClientRect();
+          diagGridCells.push({ idx: i, left: Math.round(r.left), width: Math.round(r.width) });
         }
-      }
-    }
-
-    // Diagnostic: type-event cell-blocks in first row
-    const diagEventCells: Array<{ idx: number; innerHTML: string; childWidths: string }> = [];
-    if (rows[0]) {
-      const firstRowBlocks: any[] = Array.from(rows[0].querySelectorAll('.cell-block'));
-      for (let i = 0; i < firstRowBlocks.length; i++) {
-        const cls = (firstRowBlocks[i].className || '') as string;
-        if (!cls.includes('type-event')) continue;
-        const cellW = firstRowBlocks[i].getBoundingClientRect().width;
-        const childWidths = Array.from(firstRowBlocks[i].querySelectorAll('*'))
-          .map((el: any) => {
-            const r = el.getBoundingClientRect();
-            return `${(el.className || '').substring(0, 30)}:${Math.round(r.width)}px`;
-          })
-          .join(', ');
-        diagEventCells.push({
-          idx: i,
-          innerHTML: firstRowBlocks[i].innerHTML.substring(0, 400),
-          childWidths: `cellW=${Math.round(cellW)},children=[${childWidths}]`,
-        });
       }
     }
 
@@ -481,9 +435,8 @@ async function scanAvailability(
         })),
         bodyRowCount: rows.length,
         firstRowCellBlocks: rows[0] ? rows[0].querySelectorAll('.cell-block').length : 0,
-        diagCellsAroundTarget: diagCells,
-        diagCellDivsAroundTarget: diagCellDivs,
-        diagEventCells,
+        firstRowGridCells: diagGridCells,
+        allBlocksFirstRow: diagAllBlocks,
       },
     };
   }, { targetDays });
@@ -515,7 +468,7 @@ async function scanAvailability(
         hasEmptyType,
         hasPrice,
         coveredBy: c.coveredBy || 'none',
-        cellDivChildInfo: c.cellDivChildInfo || 'empty',
+        matchMethod: c.matchMethod || 'none',
         free,
       });
       return { date: dateStr, text: c.text, free };
