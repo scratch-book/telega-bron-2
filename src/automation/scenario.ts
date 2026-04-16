@@ -237,40 +237,87 @@ async function scanAvailability(
       return { error: 'table-block not found', properties: [] };
     }
 
-    // 1) Build day→index map from header .day-number spans
-    const headerDaySpans: any[] = Array.from(
-      tableBlock.querySelectorAll('thead .day-number')
-    );
-    const dayToIndex = new Map<number, number>();
-    headerDaySpans.forEach((span: any, i: number) => {
-      const n = parseInt((span.textContent || '').trim(), 10);
-      if (!isNaN(n) && !dayToIndex.has(n)) {
-        dayToIndex.set(n, i);
+    // 1) Get all th elements from thead and extract day numbers with their column index
+    const allThs: any[] = Array.from(tableBlock.querySelectorAll('thead th'));
+    const thDayEntries: Array<{ thIdx: number; day: number }> = [];
+    allThs.forEach((th: any, idx: number) => {
+      const span = th.querySelector('.day-number');
+      if (span) {
+        const n = parseInt((span.textContent || '').trim(), 10);
+        if (!isNaN(n)) thDayEntries.push({ thIdx: idx, day: n });
       }
     });
 
-    // 2) For each tbody row, find .cell-block elements (one per day) and match by index
+    // 2) Split into month sections (day number decrease = new month boundary)
+    const sections: Array<Array<{ thIdx: number; day: number }>> = [];
+    let curSection: Array<{ thIdx: number; day: number }> = [];
+    for (const entry of thDayEntries) {
+      if (curSection.length > 0 && entry.day < curSection[curSection.length - 1].day) {
+        sections.push(curSection);
+        curSection = [];
+      }
+      curSection.push(entry);
+    }
+    if (curSection.length > 0) sections.push(curSection);
+
+    // 3) Find the section containing ALL target days (= correct month)
+    let targetSection = sections.find((s) =>
+      arg.targetDays.every((d: number) => s.some((e) => e.day === d))
+    );
+    if (!targetSection && sections.length > 0) {
+      targetSection = sections.reduce((best, s) => {
+        const cnt = arg.targetDays.filter((d: number) => s.some((e) => e.day === d)).length;
+        const bestCnt = arg.targetDays.filter((d: number) => best.some((e) => e.day === d)).length;
+        return cnt > bestCnt ? s : best;
+      });
+    }
+
+    // 4) Build day → thIdx from the target section only
+    const dayToThIdx = new Map<number, number>();
+    if (targetSection) {
+      for (const entry of targetSection) {
+        if (!dayToThIdx.has(entry.day)) dayToThIdx.set(entry.day, entry.thIdx);
+      }
+    }
+
+    // 5) Scan body rows — use td column index to match header th index
     const rows: any[] = Array.from(tableBlock.querySelectorAll('tbody tr'));
     const properties: ScanResult['properties'] = [];
 
     for (const row of rows) {
-      const firstCell: any = row.querySelector('td, th');
-      if (!firstCell) continue;
-      let nameText = (firstCell.textContent || '').trim().replace(/\s+/g, ' ');
+      const tds: any[] = Array.from(row.querySelectorAll('td, th'));
+      if (tds.length === 0) continue;
+      let nameText = (tds[0].textContent || '').trim().replace(/\s+/g, ' ');
       nameText = nameText.replace(/mail_outline$/, '').trim();
       if (!nameText) continue;
 
-      // All cell-blocks in this row (inside div.cell-row inside the data td)
-      const cellBlocks: any[] = Array.from(row.querySelectorAll('.cell-block'));
+      const allCellBlocks: any[] = Array.from(row.querySelectorAll('.cell-block'));
 
       const cellsByDay = arg.targetDays.map((day: number) => {
-        const idx = dayToIndex.get(day);
-        if (idx === undefined) return { day, text: '', className: 'day-not-in-header' };
-        if (idx >= cellBlocks.length) return { day, text: '', className: `idx-${idx}-of-${cellBlocks.length}` };
+        const thIdx = dayToThIdx.get(day);
+        if (thIdx === undefined) return { day, text: '', className: 'day-not-in-header' };
 
-        const block = cellBlocks[idx];
-        const className = (block?.className || '').substring(0, 120);
-        const priceEl = block?.querySelector('.price');
+        let block: any = null;
+
+        // Primary: match by td column index (standard table: th[i] ↔ td[i])
+        if (thIdx < tds.length) {
+          block = tds[thIdx].querySelector('.cell-block');
+        }
+
+        // Fallback: if body uses flat cell-block list (fewer tds than ths),
+        // compute offset from the first day-column th index
+        if (!block && allCellBlocks.length > 0 && thDayEntries.length > 0) {
+          const firstDayThIdx = thDayEntries[0].thIdx;
+          const cellBlockIdx = thIdx - firstDayThIdx;
+          if (cellBlockIdx >= 0 && cellBlockIdx < allCellBlocks.length) {
+            block = allCellBlocks[cellBlockIdx];
+          }
+        }
+
+        if (!block) return { day, text: '', className: 'cell-not-found' };
+
+        const className = (block.className || '').substring(0, 120);
+        const priceEl = block.querySelector('.price');
         const text = priceEl ? (priceEl.textContent || '').trim() : '';
         return { day, text, className };
       });
@@ -282,8 +329,15 @@ async function scanAvailability(
       error: null,
       properties,
       debug: {
-        headerDayCount: headerDaySpans.length,
+        headerThCount: allThs.length,
+        headerDayCount: thDayEntries.length,
+        monthSections: sections.map((s) => ({
+          days: s.map((e) => e.day),
+          startThIdx: s[0]?.thIdx,
+        })),
+        targetSectionStartDay: targetSection?.[0]?.day,
         bodyRowCount: rows.length,
+        firstRowTdCount: rows[0] ? rows[0].querySelectorAll('td, th').length : 0,
         firstRowCellBlocks: rows[0] ? rows[0].querySelectorAll('.cell-block').length : 0,
       },
     };
