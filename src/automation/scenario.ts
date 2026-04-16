@@ -226,7 +226,7 @@ async function scanAvailability(
 
   type ScanResult = {
     error: string | null;
-    properties: Array<{ name: string; cellsByDay: Array<{ day: number; spanIdx: number; text: string; className: string; allText: string; coveredBy: string }> }>;
+    properties: Array<{ name: string; cellsByDay: Array<{ day: number; spanIdx: number; text: string; className: string; allText: string; coveredBy: string; cellDivChildInfo: string }> }>;
     debug?: any;
   };
 
@@ -293,11 +293,14 @@ async function scanAvailability(
       }
     }
 
-    // 5) Scan body rows — cell-blocks are a flat list aligned to the header spans.
-    //    IMPORTANT: Bookings in the shahmatka are shown as CSS overlay bars.
+    // 5) Scan body rows.
+    //    DOM structure: div.cell-row contains:
+    //      - div.cell × 60 (CSS grid columns, one per day — NOT bookings)
+    //      - div.cell-block × 48 (content blocks: prices / events)
     //    Only the FIRST cell of a booking gets class "type-event"; subsequent cells
-    //    remain "type-empty" even though they're visually covered by the booking bar.
-    //    We detect these overlays via bounding-box intersection.
+    //    remain "type-empty" even though visually covered by a booking bar.
+    //    We detect multi-cell bookings by checking the width of child elements
+    //    inside type-event cell-blocks (the booking bar extends beyond the cell).
     const rows: any[] = Array.from(tableBlock.querySelectorAll('tbody tr'));
     const properties: ScanResult['properties'] = [];
 
@@ -310,54 +313,64 @@ async function scanAvailability(
 
       const cellBlocks: any[] = Array.from(row.querySelectorAll('.cell-block'));
 
-      // Build booked horizontal ranges from event overlay elements.
-      // Strategy: find all type-event cells and their descendants that extend
-      // beyond the cell width (booking bars), plus any non-cell-block siblings
-      // in the cell-row that could be overlay bars.
-      const bookedRanges: Array<{ left: number; right: number; src: string }> = [];
+      // Build set of booked cell-block indices.
+      // 1) Direct: cell-blocks with type-event / type-booked are booked.
+      // 2) Span: if a type-event cell's child element is wider than the cell,
+      //    it's a booking bar spanning multiple days — mark subsequent indices.
+      const bookedIndices = new Set<number>();
 
-      for (const block of cellBlocks) {
-        const cls = (block.className || '') as string;
-        if (!cls.includes('type-event')) continue;
-        const cellRect = block.getBoundingClientRect();
-        // The event cell itself is booked
-        if (cellRect.width > 0) {
-          bookedRanges.push({ left: cellRect.left, right: cellRect.right, src: 'type-event-cell' });
-        }
-        // Check ALL descendants for elements wider than the cell (event bars extending over multiple cells)
-        const descendants: any[] = Array.from(block.querySelectorAll('*'));
+      for (let i = 0; i < cellBlocks.length; i++) {
+        const cls = (cellBlocks[i].className || '') as string;
+        if (!cls.includes('type-event') && !cls.includes('type-booked')) continue;
+        bookedIndices.add(i);
+
+        const cellWidth = cellBlocks[i].getBoundingClientRect().width || cellBlocks[i].offsetWidth;
+        if (cellWidth <= 0) continue;
+
+        // Check all descendants for elements wider than the cell (booking bars)
+        const descendants: any[] = Array.from(cellBlocks[i].querySelectorAll('*'));
         for (const desc of descendants) {
+          // Use the largest of: rendered width, scrollWidth, parsed CSS width
           const descRect = desc.getBoundingClientRect();
-          if (descRect.width > cellRect.width * 1.2) {
-            bookedRanges.push({ left: descRect.left, right: descRect.right, src: 'event-bar-child' });
+          let maxW = Math.max(descRect.width, desc.scrollWidth || 0);
+          const styleW = desc.style?.width || '';
+          if (styleW.endsWith('px')) {
+            maxW = Math.max(maxW, parseFloat(styleW) || 0);
+          } else if (styleW.endsWith('%')) {
+            maxW = Math.max(maxW, (parseFloat(styleW) || 0) / 100 * cellWidth);
+          }
+
+          if (maxW > cellWidth * 1.5) {
+            const span = Math.round(maxW / cellWidth);
+            for (let j = 1; j < span && (i + j) < cellBlocks.length; j++) {
+              bookedIndices.add(i + j);
+            }
+            break;
           }
         }
       }
 
-      // Also check for non-cell-block children of the cell-row (event overlay siblings)
+      // Also check: .cell grid divs may contain booking elements.
+      // The .cell divs (60, one per day) are siblings of .cell-block divs.
+      // If a .cell div at position N has children, that day may have a booking.
       const cellRow = row.querySelector('.cell-row');
+      const cellGridDivs: any[] = [];
       if (cellRow) {
-        const rowChildren: any[] = Array.from(cellRow.children);
-        for (const child of rowChildren) {
-          const childCls = (child.className || '') as string;
-          if (childCls.includes('cell-block')) continue;
-          const childRect = child.getBoundingClientRect();
-          if (childRect.width > 0) {
-            bookedRanges.push({
-              left: childRect.left,
-              right: childRect.right,
-              src: 'cellrow-sibling:' + childCls.substring(0, 60),
-            });
+        for (const child of Array.from(cellRow.children) as any[]) {
+          const cls = (child.className || '') as string;
+          // Match exactly "cell" class, not "cell-block" or "cell-row"
+          if (cls.split(/\s+/).includes('cell')) {
+            cellGridDivs.push(child);
           }
         }
       }
 
       const cellsByDay = arg.targetDays.map((day: number) => {
         const spanIdx = dayToSpanIdx.get(day);
-        if (spanIdx === undefined) return { day, spanIdx: -1, text: '', className: 'day-not-in-header', allText: '', coveredBy: '' };
+        if (spanIdx === undefined) return { day, spanIdx: -1, text: '', className: 'day-not-in-header', allText: '', coveredBy: '', cellDivChildInfo: '' };
 
         if (spanIdx >= cellBlocks.length) {
-          return { day, spanIdx, text: '', className: `idx-${spanIdx}-of-${cellBlocks.length}`, allText: '', coveredBy: '' };
+          return { day, spanIdx, text: '', className: `idx-${spanIdx}-of-${cellBlocks.length}`, allText: '', coveredBy: '', cellDivChildInfo: '' };
         }
 
         const block = cellBlocks[spanIdx];
@@ -366,56 +379,87 @@ async function scanAvailability(
         const text = priceEl ? (priceEl.textContent || '').trim() : '';
         const allText = (block?.textContent || '').trim().substring(0, 100);
 
-        // Check if this cell is visually covered by a booking overlay
+        // Detection method 1: bookedIndices (type-event + span detection)
         let coveredBy = '';
-        const cellRect = block.getBoundingClientRect();
-        if (cellRect.width > 0) {
-          const centerX = cellRect.left + cellRect.width / 2;
-          for (const range of bookedRanges) {
-            if (range.left <= centerX && range.right >= centerX) {
-              coveredBy = range.src;
-              break;
-            }
+        if (bookedIndices.has(spanIdx)) {
+          coveredBy = 'event-span';
+        }
+
+        // Detection method 2: check .cell grid div at this index for children
+        // (booking bars might be rendered inside .cell containers)
+        let cellDivChildInfo = '';
+        if (spanIdx < cellGridDivs.length) {
+          const cd = cellGridDivs[spanIdx];
+          if (cd.children.length > 0) {
+            const firstChildCls = (cd.children[0]?.className || '').substring(0, 80);
+            const firstChildHtml = cd.innerHTML.substring(0, 200);
+            cellDivChildInfo = `${cd.children.length}ch:${firstChildCls}|${firstChildHtml}`;
           }
         }
 
-        return { day, spanIdx, text, className, allText, coveredBy };
+        return { day, spanIdx, text, className, allText, coveredBy, cellDivChildInfo };
       });
 
       properties.push({ name: nameText, cellsByDay });
     }
 
-    // Diagnostic: dump a few cell-block classes around target indices for first row
-    const diagCells: Array<{ idx: number; cls: string; txt: string }> = [];
+    // Diagnostic: cell-blocks around target for first row
+    const diagCells: Array<{ idx: number; cls: string; txt: string; innerHTML: string }> = [];
     if (rows[0] && targetSection) {
       const firstRowBlocks: any[] = Array.from(rows[0].querySelectorAll('.cell-block'));
       const sampleIdx = dayToSpanIdx.get(arg.targetDays[0]) ?? 0;
-      for (let i = Math.max(0, sampleIdx - 2); i <= Math.min(firstRowBlocks.length - 1, sampleIdx + 4); i++) {
+      for (let i = Math.max(0, sampleIdx - 3); i <= Math.min(firstRowBlocks.length - 1, sampleIdx + 5); i++) {
         const b = firstRowBlocks[i];
         diagCells.push({
           idx: i,
           cls: (b?.className || '').substring(0, 100),
           txt: (b?.textContent || '').trim().substring(0, 50),
+          innerHTML: (b?.innerHTML || '').substring(0, 200),
         });
       }
     }
 
-    // Diagnostic: dump non-cell-block children of first row's cell-row
-    const firstRowOverlays: Array<{ tag: string; cls: string; width: number }> = [];
+    // Diagnostic: .cell grid divs around target for first row
+    const diagCellDivs: Array<{ idx: number; childCount: number; innerHTML: string }> = [];
     if (rows[0]) {
       const cr = rows[0].querySelector('.cell-row');
       if (cr) {
-        const children: any[] = Array.from(cr.children);
-        for (const child of children) {
+        const gridCells: any[] = [];
+        for (const child of Array.from(cr.children) as any[]) {
           const cls = (child.className || '') as string;
-          if (cls.includes('cell-block')) continue;
-          const rect = child.getBoundingClientRect();
-          firstRowOverlays.push({
-            tag: child.tagName?.toLowerCase() || '?',
-            cls: cls.substring(0, 100),
-            width: Math.round(rect.width),
+          if (cls.split(/\s+/).includes('cell')) gridCells.push(child);
+        }
+        const sampleIdx = dayToSpanIdx.get(arg.targetDays[0]) ?? 0;
+        for (let i = Math.max(0, sampleIdx - 2); i <= Math.min(gridCells.length - 1, sampleIdx + 4); i++) {
+          const cd = gridCells[i];
+          diagCellDivs.push({
+            idx: i,
+            childCount: cd.children.length,
+            innerHTML: cd.innerHTML.substring(0, 300),
           });
         }
+      }
+    }
+
+    // Diagnostic: type-event cell-blocks in first row
+    const diagEventCells: Array<{ idx: number; innerHTML: string; childWidths: string }> = [];
+    if (rows[0]) {
+      const firstRowBlocks: any[] = Array.from(rows[0].querySelectorAll('.cell-block'));
+      for (let i = 0; i < firstRowBlocks.length; i++) {
+        const cls = (firstRowBlocks[i].className || '') as string;
+        if (!cls.includes('type-event')) continue;
+        const cellW = firstRowBlocks[i].getBoundingClientRect().width;
+        const childWidths = Array.from(firstRowBlocks[i].querySelectorAll('*'))
+          .map((el: any) => {
+            const r = el.getBoundingClientRect();
+            return `${(el.className || '').substring(0, 30)}:${Math.round(r.width)}px`;
+          })
+          .join(', ');
+        diagEventCells.push({
+          idx: i,
+          innerHTML: firstRowBlocks[i].innerHTML.substring(0, 400),
+          childWidths: `cellW=${Math.round(cellW)},children=[${childWidths}]`,
+        });
       }
     }
 
@@ -424,13 +468,6 @@ async function scanAvailability(
       properties,
       debug: {
         headerDayCount: dayEntries.length,
-        monthSections: sections.map((s, i) => ({
-          sectionIdx: i,
-          size: s.length,
-          firstDay: s[0]?.day,
-          lastDay: s[s.length - 1]?.day,
-          startSpanIdx: s[0]?.spanIdx,
-        })),
         chosenSection: targetSection
           ? {
               days: `${targetSection[0]?.day}..${targetSection[targetSection.length - 1]?.day}`,
@@ -444,8 +481,9 @@ async function scanAvailability(
         })),
         bodyRowCount: rows.length,
         firstRowCellBlocks: rows[0] ? rows[0].querySelectorAll('.cell-block').length : 0,
-        firstRowOverlays,
         diagCellsAroundTarget: diagCells,
+        diagCellDivsAroundTarget: diagCellDivs,
+        diagEventCells,
       },
     };
   }, { targetDays });
@@ -477,6 +515,7 @@ async function scanAvailability(
         hasEmptyType,
         hasPrice,
         coveredBy: c.coveredBy || 'none',
+        cellDivChildInfo: c.cellDivChildInfo || 'empty',
         free,
       });
       return { date: dateStr, text: c.text, free };
