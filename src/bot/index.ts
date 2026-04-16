@@ -286,11 +286,11 @@ async function startTask(ctx: Context, request: BookingRequest): Promise<void> {
           await ctx.telegram.sendMessage(chatId, message);
 
           // Send screenshot
-          if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
-            await ctx.telegram.sendPhoto(chatId, {
-              source: fs.createReadStream(result.screenshotPath),
-            });
-          }
+          // if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
+          //   await ctx.telegram.sendPhoto(chatId, {
+          //     source: fs.createReadStream(result.screenshotPath),
+          //   });
+          // }
         } else if (status === 'error' && result) {
           let message =
             `❌ Задача ${taskId}: ошибка\n\n` +
@@ -299,11 +299,11 @@ async function startTask(ctx: Context, request: BookingRequest): Promise<void> {
           await ctx.telegram.sendMessage(chatId, message);
 
           // Send error screenshot if available
-          if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
-            await ctx.telegram.sendPhoto(chatId, {
-              source: fs.createReadStream(result.screenshotPath),
-            });
-          }
+          // if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
+          //   await ctx.telegram.sendPhoto(chatId, {
+          //     source: fs.createReadStream(result.screenshotPath),
+          //   });
+          // }
         }
       } catch (sendError: any) {
         logger.error('Failed to send status update to Telegram', {
@@ -343,18 +343,18 @@ async function startDemoTask(ctx: Context, request: BookingRequest): Promise<voi
 
           await ctx.telegram.sendMessage(chatId, message);
 
-          if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
-            await ctx.telegram.sendPhoto(chatId, {
-              source: fs.createReadStream(result.screenshotPath),
-            });
-          }
+          // if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
+          //   await ctx.telegram.sendPhoto(chatId, {
+          //     source: fs.createReadStream(result.screenshotPath),
+          //   });
+          // }
         } else if (status === 'error' && result) {
           await ctx.telegram.sendMessage(chatId, `❌ Демо ошибка: ${result.errorMessage}`);
-          if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
-            await ctx.telegram.sendPhoto(chatId, {
-              source: fs.createReadStream(result.screenshotPath),
-            });
-          }
+          // if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
+          //   await ctx.telegram.sendPhoto(chatId, {
+          //     source: fs.createReadStream(result.screenshotPath),
+          //   });
+          // }
         }
       } catch (sendError: any) {
         logger.error('Failed to send demo status to Telegram', { taskId, error: sendError.message });
