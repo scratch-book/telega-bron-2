@@ -237,21 +237,20 @@ async function scanAvailability(
       return { error: 'table-block not found', properties: [] };
     }
 
-    // 1) Get all th elements from thead and extract day numbers with their column index
-    const allThs: any[] = Array.from(tableBlock.querySelectorAll('thead th'));
-    const thDayEntries: Array<{ thIdx: number; day: number }> = [];
-    allThs.forEach((th: any, idx: number) => {
-      const span = th.querySelector('.day-number');
-      if (span) {
-        const n = parseInt((span.textContent || '').trim(), 10);
-        if (!isNaN(n)) thDayEntries.push({ thIdx: idx, day: n });
-      }
+    // 1) Flat list of ALL .day-number spans from thead (each th may contain many)
+    const headerDaySpans: any[] = Array.from(
+      tableBlock.querySelectorAll('thead .day-number')
+    );
+    const dayEntries: Array<{ spanIdx: number; day: number }> = [];
+    headerDaySpans.forEach((span: any, idx: number) => {
+      const n = parseInt((span.textContent || '').trim(), 10);
+      if (!isNaN(n)) dayEntries.push({ spanIdx: idx, day: n });
     });
 
     // 2) Split into month sections (day number decrease = new month boundary)
-    const sections: Array<Array<{ thIdx: number; day: number }>> = [];
-    let curSection: Array<{ thIdx: number; day: number }> = [];
-    for (const entry of thDayEntries) {
+    const sections: Array<Array<{ spanIdx: number; day: number }>> = [];
+    let curSection: Array<{ spanIdx: number; day: number }> = [];
+    for (const entry of dayEntries) {
       if (curSection.length > 0 && entry.day < curSection[curSection.length - 1].day) {
         sections.push(curSection);
         curSection = [];
@@ -265,6 +264,7 @@ async function scanAvailability(
       arg.targetDays.every((d: number) => s.some((e) => e.day === d))
     );
     if (!targetSection && sections.length > 0) {
+      // Fallback: section with most matching target days
       targetSection = sections.reduce((best, s) => {
         const cnt = arg.targetDays.filter((d: number) => s.some((e) => e.day === d)).length;
         const bestCnt = arg.targetDays.filter((d: number) => best.some((e) => e.day === d)).length;
@@ -272,52 +272,41 @@ async function scanAvailability(
       });
     }
 
-    // 4) Build day → thIdx from the target section only
-    const dayToThIdx = new Map<number, number>();
+    // 4) Build day → spanIdx from the target section only (avoids cross-month collisions)
+    const dayToSpanIdx = new Map<number, number>();
     if (targetSection) {
       for (const entry of targetSection) {
-        if (!dayToThIdx.has(entry.day)) dayToThIdx.set(entry.day, entry.thIdx);
+        if (!dayToSpanIdx.has(entry.day)) dayToSpanIdx.set(entry.day, entry.spanIdx);
       }
     }
 
-    // 5) Scan body rows — use td column index to match header th index
+    // 5) Scan body rows — cell-blocks are a flat list aligned to the header spans
     const rows: any[] = Array.from(tableBlock.querySelectorAll('tbody tr'));
     const properties: ScanResult['properties'] = [];
 
     for (const row of rows) {
-      const tds: any[] = Array.from(row.querySelectorAll('td, th'));
-      if (tds.length === 0) continue;
-      let nameText = (tds[0].textContent || '').trim().replace(/\s+/g, ' ');
+      const firstCell: any = row.querySelector('td, th');
+      if (!firstCell) continue;
+      let nameText = (firstCell.textContent || '').trim().replace(/\s+/g, ' ');
       nameText = nameText.replace(/mail_outline$/, '').trim();
       if (!nameText) continue;
 
-      const allCellBlocks: any[] = Array.from(row.querySelectorAll('.cell-block'));
+      const cellBlocks: any[] = Array.from(row.querySelectorAll('.cell-block'));
 
       const cellsByDay = arg.targetDays.map((day: number) => {
-        const thIdx = dayToThIdx.get(day);
-        if (thIdx === undefined) return { day, text: '', className: 'day-not-in-header' };
+        const spanIdx = dayToSpanIdx.get(day);
+        if (spanIdx === undefined) return { day, text: '', className: 'day-not-in-header' };
 
-        let block: any = null;
-
-        // Primary: match by td column index (standard table: th[i] ↔ td[i])
-        if (thIdx < tds.length) {
-          block = tds[thIdx].querySelector('.cell-block');
+        // Cell-blocks align to header spans from the start (left edge).
+        // If header has more spans than cell-blocks, the extra spans are at the right
+        // (future dates beyond the property's grid). Direct index works.
+        if (spanIdx >= cellBlocks.length) {
+          return { day, text: '', className: `idx-${spanIdx}-of-${cellBlocks.length}` };
         }
 
-        // Fallback: if body uses flat cell-block list (fewer tds than ths),
-        // compute offset from the first day-column th index
-        if (!block && allCellBlocks.length > 0 && thDayEntries.length > 0) {
-          const firstDayThIdx = thDayEntries[0].thIdx;
-          const cellBlockIdx = thIdx - firstDayThIdx;
-          if (cellBlockIdx >= 0 && cellBlockIdx < allCellBlocks.length) {
-            block = allCellBlocks[cellBlockIdx];
-          }
-        }
-
-        if (!block) return { day, text: '', className: 'cell-not-found' };
-
-        const className = (block.className || '').substring(0, 120);
-        const priceEl = block.querySelector('.price');
+        const block = cellBlocks[spanIdx];
+        const className = (block?.className || '').substring(0, 120);
+        const priceEl = block?.querySelector('.price');
         const text = priceEl ? (priceEl.textContent || '').trim() : '';
         return { day, text, className };
       });
@@ -329,15 +318,16 @@ async function scanAvailability(
       error: null,
       properties,
       debug: {
-        headerThCount: allThs.length,
-        headerDayCount: thDayEntries.length,
+        headerDayCount: dayEntries.length,
         monthSections: sections.map((s) => ({
-          days: s.map((e) => e.day),
-          startThIdx: s[0]?.thIdx,
+          size: s.length,
+          firstDay: s[0]?.day,
+          lastDay: s[s.length - 1]?.day,
         })),
-        targetSectionStartDay: targetSection?.[0]?.day,
+        targetSectionDays: targetSection
+          ? `${targetSection[0]?.day}..${targetSection[targetSection.length - 1]?.day}`
+          : null,
         bodyRowCount: rows.length,
-        firstRowTdCount: rows[0] ? rows[0].querySelectorAll('td, th').length : 0,
         firstRowCellBlocks: rows[0] ? rows[0].querySelectorAll('.cell-block').length : 0,
       },
     };
