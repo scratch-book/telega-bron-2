@@ -219,11 +219,82 @@ async function scanAvailability(
 ): Promise<PropertyAvailability[]> {
   const targetDays = nights.map((d) => d.getDate());
 
+  // First pass: diagnose the actual DOM structure of #table-block
+  const domInfo: any = await page.evaluate(() => {
+    const doc = (globalThis as any).document;
+    const tb = doc?.querySelector('#table-block');
+    if (!tb) return { error: 'table-block not found' };
+
+    const tables = Array.from(tb.querySelectorAll('table')) as any[];
+    const tableInfo = tables.map((t: any, i: number) => ({
+      index: i,
+      id: t.id || '',
+      className: t.className || '',
+      theadRows: t.querySelectorAll('thead tr').length,
+      tbodyRows: t.querySelectorAll('tbody tr').length,
+      totalCells: t.querySelectorAll('td, th').length,
+    }));
+
+    // Look for div-based grids
+    const grids = Array.from(tb.querySelectorAll('[role="grid"], [role="table"]')) as any[];
+    const gridInfo = grids.map((g: any) => ({
+      tag: g.tagName,
+      id: g.id || '',
+      className: (g.className || '').substring(0, 100),
+      childCount: g.children.length,
+    }));
+
+    // Direct children summary
+    const children = Array.from(tb.children) as any[];
+    const childSummary = children.slice(0, 10).map((c: any) => ({
+      tag: c.tagName,
+      id: c.id || '',
+      className: (c.className || '').substring(0, 80),
+      childCount: c.children.length,
+    }));
+
+    // Look for elements that contain day numbers (potential column headers)
+    const dayElements: string[] = [];
+    const walker = doc.createTreeWalker(tb, 1 /* SHOW_ELEMENT */);
+    let node;
+    let count = 0;
+    while ((node = walker.nextNode()) && count < 5000) {
+      count++;
+      const text = (node.textContent || '').trim();
+      if (/^\d{1,2}$/.test(text)) {
+        const n = parseInt(text, 10);
+        if (n >= 1 && n <= 31 && dayElements.length < 40) {
+          dayElements.push(`<${node.tagName} class="${(node.className || '').substring(0, 50)}">${n}`);
+        }
+      }
+    }
+
+    // First tbody row cell count (for comparison)
+    const firstTbodyRow = tb.querySelector('tbody tr');
+    const firstRowCells = firstTbodyRow
+      ? Array.from(firstTbodyRow.querySelectorAll('td, th')).length
+      : 0;
+
+    // Snippet of innerHTML (first 500 chars)
+    const snippet = (tb.innerHTML || '').substring(0, 500);
+
+    return {
+      tables: tableInfo,
+      grids: gridInfo,
+      children: childSummary,
+      dayElements,
+      firstRowCells,
+      snippet,
+    };
+  });
+
+  logger.info('DOM structure diagnosis of #table-block', { taskId, domInfo });
+
   type ScanResult = {
     error: string | null;
     properties: Array<{ name: string; cellsByDay: Array<{ day: number; text: string }> }>;
     columns: Array<[number, number]>;
-    debug?: { theadRowCount: number; pickedRowCellCount: number; allRowCellCounts: number[]; bodyRowCount: number };
+    debug?: any;
   };
 
   const raw: ScanResult = await page.evaluate((arg: { targetDays: number[] }): ScanResult => {
@@ -234,7 +305,6 @@ async function scanAvailability(
     }
 
     // Pick the thead row with the MOST cells — that's the day-numbers row.
-    // Other rows (month labels, summaries) have far fewer cells.
     const theadRows: any[] = Array.from(tableBlock.querySelectorAll('thead tr'));
     if (theadRows.length === 0) {
       return { error: 'thead has no rows', properties: [], columns: [] };
@@ -249,6 +319,10 @@ async function scanAvailability(
       }
     }
     const headerCells: any[] = Array.from(dayHeaderRow.querySelectorAll('th, td'));
+
+    // Dump first 10 header cell texts for debugging
+    const headerTexts = headerCells.slice(0, 10).map((c: any) => (c.textContent || '').trim().substring(0, 30));
+
     const dayToColumn = new Map<number, number>();
     headerCells.forEach((cell: any, i: number) => {
       const digits = (cell.textContent || '').match(/\d{1,2}/g);
@@ -269,6 +343,11 @@ async function scanAvailability(
       if (!nameText) continue;
 
       const cells: any[] = Array.from(row.querySelectorAll('td, th'));
+      // Dump first row cell texts for debugging
+      const cellTexts = properties.length === 0
+        ? cells.slice(0, 10).map((c: any) => (c.textContent || '').trim().substring(0, 30))
+        : undefined;
+
       const cellsByDay = arg.targetDays.map((day: number) => {
         const colIdx = dayToColumn.get(day);
         let text = '';
@@ -278,7 +357,7 @@ async function scanAvailability(
         }
         return { day, text };
       });
-      properties.push({ name: nameText, cellsByDay });
+      properties.push({ name: nameText, cellsByDay, ...(cellTexts ? { cellTexts } : {}) } as any);
     }
 
     return {
@@ -290,6 +369,7 @@ async function scanAvailability(
         pickedRowCellCount: headerCells.length,
         allRowCellCounts: theadRows.map((r: any) => r.querySelectorAll('th, td').length),
         bodyRowCount: rows.length,
+        headerTexts,
       },
     };
   }, { targetDays });
