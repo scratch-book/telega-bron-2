@@ -226,7 +226,7 @@ async function scanAvailability(
 
   type ScanResult = {
     error: string | null;
-    properties: Array<{ name: string; cellsByDay: Array<{ day: number; text: string; className: string }> }>;
+    properties: Array<{ name: string; cellsByDay: Array<{ day: number; spanIdx: number; text: string; className: string; allText: string }> }>;
     debug?: any;
   };
 
@@ -259,12 +259,25 @@ async function scanAvailability(
     }
     if (curSection.length > 0) sections.push(curSection);
 
-    // 3) Find the section containing ALL target days (= correct month)
-    let targetSection = sections.find((s) =>
+    // 3) Find the section for the TARGET month.
+    //    Grid shows [prev-month-tail, target-month, next-month-head].
+    //    The prev-month tail starts mid-month (firstDay > 1),
+    //    the target month starts from day 1 and is the longest full-month section.
+    //    Among sections containing all target days, prefer ones starting with day 1 (full months).
+    //    Among those, pick the longest (full target month, not short next-month head).
+    const matchingSections = sections.filter((s) =>
       arg.targetDays.every((d: number) => s.some((e) => e.day === d))
     );
+    // Sort: prefer firstDay===1, then by size descending
+    matchingSections.sort((a, b) => {
+      const aFull = a[0]?.day === 1 ? 1 : 0;
+      const bFull = b[0]?.day === 1 ? 1 : 0;
+      if (aFull !== bFull) return bFull - aFull; // day-1 sections first
+      return b.length - a.length; // longer sections first
+    });
+    let targetSection = matchingSections[0];
     if (!targetSection && sections.length > 0) {
-      // Fallback: section with most matching target days
+      // No section has all target days — pick the one with most matches
       targetSection = sections.reduce((best, s) => {
         const cnt = arg.targetDays.filter((d: number) => s.some((e) => e.day === d)).length;
         const bestCnt = arg.targetDays.filter((d: number) => best.some((e) => e.day === d)).length;
@@ -295,23 +308,37 @@ async function scanAvailability(
 
       const cellsByDay = arg.targetDays.map((day: number) => {
         const spanIdx = dayToSpanIdx.get(day);
-        if (spanIdx === undefined) return { day, text: '', className: 'day-not-in-header' };
+        if (spanIdx === undefined) return { day, spanIdx: -1, text: '', className: 'day-not-in-header', allText: '' };
 
-        // Cell-blocks align to header spans from the start (left edge).
-        // If header has more spans than cell-blocks, the extra spans are at the right
-        // (future dates beyond the property's grid). Direct index works.
         if (spanIdx >= cellBlocks.length) {
-          return { day, text: '', className: `idx-${spanIdx}-of-${cellBlocks.length}` };
+          return { day, spanIdx, text: '', className: `idx-${spanIdx}-of-${cellBlocks.length}`, allText: '' };
         }
 
         const block = cellBlocks[spanIdx];
-        const className = (block?.className || '').substring(0, 120);
+        const className = (block?.className || '').substring(0, 200);
         const priceEl = block?.querySelector('.price');
         const text = priceEl ? (priceEl.textContent || '').trim() : '';
-        return { day, text, className };
+        // Also capture ALL visible text inside the cell-block for diagnostics
+        const allText = (block?.textContent || '').trim().substring(0, 100);
+        return { day, spanIdx, text, className, allText };
       });
 
       properties.push({ name: nameText, cellsByDay });
+    }
+
+    // Diagnostic: dump a few cell-block classes around target indices for first row
+    const diagCells: Array<{ idx: number; cls: string; txt: string }> = [];
+    if (rows[0] && targetSection) {
+      const firstRowBlocks: any[] = Array.from(rows[0].querySelectorAll('.cell-block'));
+      const sampleIdx = dayToSpanIdx.get(arg.targetDays[0]) ?? 0;
+      for (let i = Math.max(0, sampleIdx - 2); i <= Math.min(firstRowBlocks.length - 1, sampleIdx + 4); i++) {
+        const b = firstRowBlocks[i];
+        diagCells.push({
+          idx: i,
+          cls: (b?.className || '').substring(0, 100),
+          txt: (b?.textContent || '').trim().substring(0, 50),
+        });
+      }
     }
 
     return {
@@ -319,16 +346,27 @@ async function scanAvailability(
       properties,
       debug: {
         headerDayCount: dayEntries.length,
-        monthSections: sections.map((s) => ({
+        monthSections: sections.map((s, i) => ({
+          sectionIdx: i,
           size: s.length,
           firstDay: s[0]?.day,
           lastDay: s[s.length - 1]?.day,
+          startSpanIdx: s[0]?.spanIdx,
         })),
-        targetSectionDays: targetSection
-          ? `${targetSection[0]?.day}..${targetSection[targetSection.length - 1]?.day}`
+        chosenSection: targetSection
+          ? {
+              days: `${targetSection[0]?.day}..${targetSection[targetSection.length - 1]?.day}`,
+              startSpanIdx: targetSection[0]?.spanIdx,
+              size: targetSection.length,
+            }
           : null,
+        targetDaySpanIndices: arg.targetDays.map((d: number) => ({
+          day: d,
+          spanIdx: dayToSpanIdx.get(d) ?? -1,
+        })),
         bodyRowCount: rows.length,
         firstRowCellBlocks: rows[0] ? rows[0].querySelectorAll('.cell-block').length : 0,
+        diagCellsAroundTarget: diagCells,
       },
     };
   }, { targetDays });
@@ -345,7 +383,20 @@ async function scanAvailability(
       // A cell is free only if it has class "type-empty" AND contains a numeric price.
       // Occupied cells (type-booked, type-reserved, etc.) may also show a price but are NOT free.
       const hasEmptyType = (c.className || '').includes('type-empty');
-      const free = hasEmptyType && isCellFree(c.text);
+      const hasPrice = isCellFree(c.text);
+      const free = hasEmptyType && hasPrice;
+      logger.info('Cell detail', {
+        taskId,
+        property: p.name,
+        day: c.day,
+        spanIdx: c.spanIdx,
+        className: c.className,
+        priceText: c.text,
+        allText: c.allText,
+        hasEmptyType,
+        hasPrice,
+        free,
+      });
       return { date: dateStr, text: c.text, free };
     });
     const unavailableReason = cells.find((c) => !c.free);
